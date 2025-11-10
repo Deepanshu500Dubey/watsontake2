@@ -35,7 +35,7 @@ class MLAnomalyDetector:
         features.extend([
             current_expense['amount'],
             np.log1p(current_expense['amount']),
-            current_expense['amount'] ** 0.5  # Square root transform
+            current_expense['amount'] ** 0.5  
         ])
         feature_names.extend(['amount', 'log_amount', 'sqrt_amount'])
         
@@ -95,9 +95,9 @@ class MLAnomalyDetector:
         features.extend([purpose_value])
         feature_names.extend(['purpose_encoded'])
         
-        # 5. Remove temporal features (day_of_month, day_of_week) since we don't have submission_date
         
-        # 6. Interaction features
+        
+        # 5. Interaction features
         features.extend([
             current_expense['amount'] * purpose_value,
             current_expense['amount'] / (dept_history['amount'].mean() + 1e-6) if len(dept_history) > 0 else 0
@@ -295,8 +295,7 @@ class AdvancedRuleDetector:
                 )
                 confidence *= self.risk_weights[pattern['risk']]
         
-        # Remove rapid submission detection (was using index as time proxy)
-        # Instead, use frequency-based detection without temporal aspect
+        
         employee_history = expenses_df[expenses_df['employee_id'] == current_expense['employee_id']]
         if len(employee_history) > 5:  # High frequency submitter overall
             total_amount = employee_history['amount'].sum()
@@ -387,4 +386,5 @@ class EnsembleAnomalyDetector:
             "rule_patterns_count": len(self.rule_detector.suspicious_patterns)
 
         }
+
 
