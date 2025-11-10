@@ -417,7 +417,7 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
         'amount': expense.amount,
         'purpose': expense.purpose,
         'status': final_status,
-        'submission_date': datetime.now(),
+        
         'anomaly_confidence': anomaly_result['confidence_score'],
         'ml_anomaly': anomaly_result['is_anomalous']
     }
@@ -730,4 +730,5 @@ if __name__ == "__main__":
         log_level="info",
         reload=True  # Enable auto-reload for development
     )
+
 
