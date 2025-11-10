@@ -31,6 +31,7 @@ employees = ['E101', 'E102', 'E103', 'E104', 'E105', 'E106', 'E107', 'E108', 'E1
 departments = ['Finance', 'Engineering', 'Sales', 'HR', 'Marketing', 'Operations']
 purposes = ['Travel', 'Meals', 'Supplies', 'Client Entertainment', 'Training', 'Software Subscription']
 
+
 # Create 200 synthetic expense records
 expenses_data = {
     'expense_id': list(range(1, 201)),
@@ -39,11 +40,9 @@ expenses_data = {
     'amount': [round(random.uniform(50, 2500), 2) for _ in range(200)],  # expense between $50–$2500
     'purpose': [random.choice(purposes) for _ in range(200)],
     'status': [random.choice(['approved', 'pending', 'rejected']) for _ in range(200)],
-    'submission_date': [datetime.now() for _ in range(200)],
     'anomaly_confidence': [round(random.uniform(0.0, 1.0), 2) for _ in range(200)],
     'ml_anomaly': [random.choice([False, False, False, True]) for _ in range(200)]  # ~25% anomalies
 }
-
 departments_data = {
     'department': ['Sales', 'Engineering', 'HR', 'Finance'],
     'monthly_budget': [31500, 37500, 12500, 33500],
@@ -731,3 +730,4 @@ if __name__ == "__main__":
         log_level="info",
         reload=True  # Enable auto-reload for development
     )
+
