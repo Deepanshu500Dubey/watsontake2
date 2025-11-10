@@ -329,10 +329,10 @@ class LearningGovernanceService:
             return {}
             
         df = pd.DataFrame(audit_trail)
+        # Remove date-based filtering since we don't have submission dates
         return {
             'total_actions': len(audit_trail),
-            'actions_by_type': df['action'].value_counts().to_dict(),
-            'recent_activity': len([a for a in audit_trail if a['timestamp'].date() == date.today()])
+            'actions_by_type': df['action'].value_counts().to_dict()
         }
 
 # API Endpoints
@@ -731,6 +731,7 @@ if __name__ == "__main__":
         log_level="info",
         reload=True  # Enable auto-reload for development
     )
+
 
 
 
