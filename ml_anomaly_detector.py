@@ -295,13 +295,20 @@ class AdvancedRuleDetector:
                 )
                 confidence *= self.risk_weights[pattern['risk']]
         
-        # Rapid submission detection (using index as time proxy)
+        # Remove rapid submission detection (was using index as time proxy)
+        # Instead, use frequency-based detection without temporal aspect
         employee_history = expenses_df[expenses_df['employee_id'] == current_expense['employee_id']]
-        if len(employee_history) > 3:
-            recent_submissions = len(employee_history.tail(3))
-            if recent_submissions >= 3 and current_expense['amount'] > 100:
-                anomalies.append("Rapid submission pattern detected")
-                confidence *= 0.5
+        if len(employee_history) > 5:  # High frequency submitter overall
+            total_amount = employee_history['amount'].sum()
+            avg_amount = employee_history['amount'].mean()
+            
+            if current_expense['amount'] > avg_amount * 3:  # Sudden spike in amount
+                anomalies.append("Unusually high amount compared to personal history")
+                confidence *= 0.6
+                
+            if len(employee_history) > 10:  # Very frequent submitter
+                anomalies.append("Frequent expense submitter")
+                confidence *= 0.8
         
         # Department budget strain detection
         dept_expenses = expenses_df[expenses_df['department'] == current_expense['department']]
@@ -318,7 +325,6 @@ class AdvancedRuleDetector:
             "detected_patterns": anomalies,
             "rule_count": len(anomalies)
         }
-
 class EnsembleAnomalyDetector:
     def __init__(self):
         self.ml_detector = MLAnomalyDetector()
@@ -381,3 +387,4 @@ class EnsembleAnomalyDetector:
             "rule_patterns_count": len(self.rule_detector.suspicious_patterns)
 
         }
+
