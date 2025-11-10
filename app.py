@@ -660,9 +660,10 @@ async def get_ml_features():
                                 "emp_median_amount", "emp_max_amount", "emp_z_score_mean", "emp_z_score_median"],
             "department_behavior": ["dept_submission_count", "dept_mean_amount", "dept_std_amount",
                                   "dept_median_amount", "dept_z_score", "dept_95th_percentile"],
-            "purpose_temporal": ["purpose_encoded", "day_of_month", "day_of_week"],
+            "purpose_encoding": ["purpose_encoded"],
             "interaction": ["amount_purpose_interaction", "amount_dept_ratio"]
-        }
+        },
+        "note": "Temporal features removed as submission_date is no longer available"
     }
 
 # Background tasks
@@ -730,5 +731,6 @@ if __name__ == "__main__":
         log_level="info",
         reload=True  # Enable auto-reload for development
     )
+
 
 
