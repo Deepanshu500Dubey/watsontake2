@@ -27,7 +27,7 @@ class MLAnomalyDetector:
         self.feature_names = []
         
     def prepare_features(self, expenses_df: pd.DataFrame, current_expense: Dict) -> np.ndarray:
-        """Prepare features for ML model with comprehensive feature engineering"""
+        """Prepare features for ML model without temporal features"""
         features = []
         feature_names = []
         
@@ -95,13 +95,7 @@ class MLAnomalyDetector:
         features.extend([purpose_value])
         feature_names.extend(['purpose_encoded'])
         
-        # 5. Temporal features (using submission order as proxy)
-        submission_order = len(expenses_df)
-        features.extend([
-            submission_order % 30,  # Mock day of month
-            submission_order % 7,   # Mock day of week
-        ])
-        feature_names.extend(['day_of_month', 'day_of_week'])
+        # 5. Remove temporal features (day_of_month, day_of_week) since we don't have submission_date
         
         # 6. Interaction features
         features.extend([
@@ -385,4 +379,5 @@ class EnsembleAnomalyDetector:
             "ml_trained": self.ml_detector.is_trained,
             "ensemble_weights": self.ensemble_weights,
             "rule_patterns_count": len(self.rule_detector.suspicious_patterns)
+
         }
