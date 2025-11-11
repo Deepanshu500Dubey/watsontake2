@@ -197,112 +197,130 @@ class CFOReportService:
     @staticmethod
     def generate_report() -> Dict[str, Any]:
         """Generate CFO summary report with ML insights"""
+
         # Expense trends by department
         dept_summary = expenses_df.groupby('department').agg({
             'amount': ['sum', 'mean', 'count', 'std'],
             'employee_id': 'nunique'
         }).round(2)
-        
-        # Budget utilization
+
+        # Budget utilization list
         budget_utilization = []
         for dept in departments_df['department']:
-            dept_data = departments_df[departments_df['department'] == dept].iloc[0]
+            dept_data = departments_df.loc[departments_df['department'] == dept].iloc[0]
             expenses_data = expenses_df[expenses_df['department'] == dept]
-            utilization = (dept_data['budget_usage'] / dept_data['monthly_budget']) * 100
-            
+            utilization = (
+                float(dept_data['budget_usage']) / float(dept_data['monthly_budget'])
+            ) * 100 if dept_data['monthly_budget'] > 0 else 0.0
+
             budget_utilization.append({
-                'department': dept,
-                'budget_used': dept_data['budget_usage'],
-                'total_budget': dept_data['monthly_budget'],
-                'utilization_percent': round(utilization, 2),
-                'remaining_budget': dept_data['monthly_budget'] - dept_data['budget_usage'],
-                'avg_expense_amount': round(expenses_data['amount'].mean(), 2) if len(expenses_data) > 0 else 0,
-                'expense_count': len(expenses_data)
+                'department': str(dept),
+                'budget_used': float(dept_data['budget_usage']),
+                'total_budget': float(dept_data['monthly_budget']),
+                'utilization_percent': round(float(utilization), 2),
+                'remaining_budget': float(dept_data['monthly_budget'] - dept_data['budget_usage']),
+                'avg_expense_amount': round(float(expenses_data['amount'].mean()), 2) if len(expenses_data) > 0 else 0.0,
+                'expense_count': int(len(expenses_data))
             })
-        
+
         # ML insights
         ml_insights = CFOReportService._get_ml_insights()
-        
+
         # Approval statistics
-        status_counts = expenses_df['status'].value_counts().to_dict()
-        
-        return {
+        status_counts = {
+            str(k): int(v) for k, v in expenses_df['status'].value_counts().to_dict().items()
+        }
+
+        # Assemble final report
+        report = {
             'generated_at': datetime.now().isoformat(),
             'report_period': 'current_month',
             'budget_utilization': budget_utilization,
-            'department_summary': dept_summary.to_dict(),
+            'department_summary': jsonable_encoder(dept_summary.to_dict()),
             'ml_insights': ml_insights,
             'approval_statistics': status_counts,
-            'total_expenses_processed': len(expenses_df),
-            'total_amount_processed': expenses_df['amount'].sum(),
+            'total_expenses_processed': int(len(expenses_df)),
+            'total_amount_processed': float(expenses_df['amount'].sum()),
             'risk_assessment': CFOReportService._get_risk_assessment()
         }
-    
+
+        # Return JSON-encodable version
+        return jsonable_encoder(report)
+
     @staticmethod
     def _get_ml_insights() -> Dict[str, Any]:
         """Get ML model insights and performance"""
         if len(expenses_df) == 0:
             return {}
-            
+
         # Calculate anomaly statistics
         anomaly_stats = {
-            'total_anomalies_detected': expenses_df['ml_anomaly'].sum(),
-            'anomaly_rate': (expenses_df['ml_anomaly'].sum() / len(expenses_df)) * 100,
-            'avg_anomaly_confidence': expenses_df['anomaly_confidence'].mean(),
-            'high_confidence_anomalies': len(expenses_df[expenses_df['anomaly_confidence'] > 0.7])
+            'total_anomalies_detected': int(expenses_df['ml_anomaly'].sum()),
+            'anomaly_rate': round(
+                float(expenses_df['ml_anomaly'].sum() / len(expenses_df) * 100), 2
+            ),
+            'avg_anomaly_confidence': round(float(expenses_df['anomaly_confidence'].mean()), 4),
+            'high_confidence_anomalies': int(len(expenses_df[expenses_df['anomaly_confidence'] > 0.7]))
         }
-        
+
         # Department risk analysis
         dept_risk = expenses_df.groupby('department').agg({
             'ml_anomaly': 'mean',
             'anomaly_confidence': 'mean',
             'amount': 'sum'
         }).round(4)
-        
-        anomaly_stats['high_risk_departments'] = dept_risk['ml_anomaly'].to_dict()
-        
-        # Model performance (mock - in production would use actual metrics)
+
+        anomaly_stats['high_risk_departments'] = {
+            str(k): float(v) for k, v in dept_risk['ml_anomaly'].to_dict().items()
+        }
+
+        # Model performance (mock metrics)
         anomaly_stats['model_performance'] = {
             'estimated_precision': 0.82,
             'estimated_recall': 0.75,
             'estimated_f1_score': 0.78,
-            'training_size': len(expenses_df),
-            'model_status': ml_detector.ml_detector.is_trained
+            'training_size': int(len(expenses_df)),
+            'model_status': bool(ml_detector.ml_detector.is_trained)
         }
-        
+
         return anomaly_stats
-    
+
     @staticmethod
     def _get_risk_assessment() -> Dict[str, Any]:
         """Generate risk assessment for CFO"""
         risks = []
-        
+
         # Budget risks
         for dept in departments_df['department']:
-            dept_data = departments_df[departments_df['department'] == dept].iloc[0]
-            utilization = (dept_data['budget_usage'] / dept_data['monthly_budget']) * 100
-            
+            dept_data = departments_df.loc[departments_df['department'] == dept].iloc[0]
+            utilization = (
+                float(dept_data['budget_usage']) / float(dept_data['monthly_budget'])
+            ) * 100 if dept_data['monthly_budget'] > 0 else 0.0
+
             if utilization > 90:
                 risks.append(f"{dept} department exceeding 90% budget utilization")
             elif utilization > 80:
                 risks.append(f"{dept} department approaching budget limit ({utilization:.1f}%)")
-        
+
         # Anomaly risks
         high_risk_expenses = expenses_df[expenses_df['anomaly_confidence'] > 0.7]
         if len(high_risk_expenses) > 5:
             risks.append(f"Multiple high-confidence anomalies detected ({len(high_risk_expenses)})")
-        
+
         # Employee risks
         employee_submissions = expenses_df['employee_id'].value_counts()
         frequent_submitters = employee_submissions[employee_submissions > 5]
         if len(frequent_submitters) > 0:
-            risks.append(f"Frequent submitters: {', '.join(frequent_submitters.index)}")
-        
+            risks.append(f"Frequent submitters: {', '.join(map(str, frequent_submitters.index))}")
+
+        risk_level = 'HIGH' if len(risks) > 3 else 'MEDIUM' if len(risks) > 1 else 'LOW'
+
         return {
-            'risk_level': 'HIGH' if len(risks) > 3 else 'MEDIUM' if len(risks) > 1 else 'LOW',
+            'risk_level': risk_level,
             'identified_risks': risks,
-            'risk_count': len(risks)
+            'risk_count': int(len(risks))
         }
+
 
 # Learning and Governance Service
 class LearningGovernanceService:
@@ -505,12 +523,13 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
 async def get_cfo_report():
     """Generate CFO summary report"""
     report = CFOReportService.generate_report()
-    
-    # Notify CFO if high risk
-    if report['risk_assessment']['risk_level'] in ['HIGH', 'MEDIUM']:
+
+    # Notify CFO only if risk is medium or high
+    risk_level = report['risk_assessment'].get('risk_level', 'LOW')
+    if risk_level in ['HIGH', 'MEDIUM']:
         NotificationService.notify_cfo(report)
-    
-    return report
+
+    return jsonable_encoder(report)
 
 @app.get("/departments/")
 async def get_departments():
@@ -731,6 +750,7 @@ if __name__ == "__main__":
         log_level="info",
         reload=True  # Enable auto-reload for development
     )
+
 
 
 
