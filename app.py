@@ -31,7 +31,6 @@ employees = ['E101', 'E102', 'E103', 'E104', 'E105', 'E106', 'E107', 'E108', 'E1
 departments = ['Finance', 'Engineering', 'Sales', 'HR', 'Marketing', 'Operations']
 purposes = ['Travel', 'Meals', 'Supplies', 'Client Entertainment', 'Training', 'Software Subscription']
 
-
 # Create 200 synthetic expense records
 expenses_data = {
     'expense_id': list(range(1, 201)),
@@ -40,9 +39,11 @@ expenses_data = {
     'amount': [round(random.uniform(50, 2500), 2) for _ in range(200)],  # expense between $50–$2500
     'purpose': [random.choice(purposes) for _ in range(200)],
     'status': [random.choice(['approved', 'pending', 'rejected']) for _ in range(200)],
+    'submission_date': [datetime.now() for _ in range(200)],
     'anomaly_confidence': [round(random.uniform(0.0, 1.0), 2) for _ in range(200)],
     'ml_anomaly': [random.choice([False, False, False, True]) for _ in range(200)]  # ~25% anomalies
 }
+
 departments_data = {
     'department': ['Sales', 'Engineering', 'HR', 'Finance'],
     'monthly_budget': [31500, 37500, 12500, 33500],
@@ -195,132 +196,165 @@ class NotificationService:
 # CFO Reporting Service
 class CFOReportService:
     @staticmethod
+    def _convert_to_serializable(obj):
+        """Convert numpy/pandas types to Python native types for JSON serialization"""
+        if isinstance(obj, (np.integer, np.int64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64)):
+            return float(obj)
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()
+        elif isinstance(obj, pd.Series):
+            return obj.tolist()
+        elif isinstance(obj, dict):
+            return {key: CFOReportService._convert_to_serializable(value) for key, value in obj.items()}
+        elif isinstance(obj, list):
+            return [CFOReportService._convert_to_serializable(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return str(obj)  # Convert tuples to strings
+        else:
+            return obj
+
+    @staticmethod
+    def _flatten_multiindex_columns(df_dict):
+        """Flatten multi-level column indexes from pandas DataFrames"""
+        flattened = {}
+        for key, value in df_dict.items():
+            if isinstance(key, tuple):
+                # Convert tuple key to string
+                new_key = "_".join(str(k) for k in key if k)
+                flattened[new_key] = CFOReportService._convert_to_serializable(value)
+            else:
+                flattened[str(key)] = CFOReportService._convert_to_serializable(value)
+        return flattened
+
+    @staticmethod
     def generate_report() -> Dict[str, Any]:
         """Generate CFO summary report with ML insights"""
-
-        # Expense trends by department
+        # Expense trends by department - create a simpler structure
         dept_summary = expenses_df.groupby('department').agg({
-            'amount': ['sum', 'mean', 'count', 'std'],
+            'amount': ['sum', 'mean', 'count'],
             'employee_id': 'nunique'
         }).round(2)
-
-        # Budget utilization list
+        
+        # Convert to a simpler dictionary structure
+        department_summary_simple = {}
+        for dept in dept_summary.index:
+            dept_data = {}
+            for col in dept_summary.columns:
+                # Flatten column names
+                if isinstance(col, tuple):
+                    col_name = f"{col[0]}_{col[1]}"
+                else:
+                    col_name = col
+                dept_data[col_name] = CFOReportService._convert_to_serializable(dept_summary.loc[dept, col])
+            department_summary_simple[dept] = dept_data
+        
+        # Budget utilization
         budget_utilization = []
         for dept in departments_df['department']:
-            dept_data = departments_df.loc[departments_df['department'] == dept].iloc[0]
+            dept_data = departments_df[departments_df['department'] == dept].iloc[0]
             expenses_data = expenses_df[expenses_df['department'] == dept]
-            utilization = (
-                float(dept_data['budget_usage']) / float(dept_data['monthly_budget'])
-            ) * 100 if dept_data['monthly_budget'] > 0 else 0.0
-
+            utilization = (dept_data['budget_usage'] / dept_data['monthly_budget']) * 100
+            
             budget_utilization.append({
-                'department': str(dept),
+                'department': dept,
                 'budget_used': float(dept_data['budget_usage']),
                 'total_budget': float(dept_data['monthly_budget']),
-                'utilization_percent': round(float(utilization), 2),
+                'utilization_percent': round(utilization, 2),
                 'remaining_budget': float(dept_data['monthly_budget'] - dept_data['budget_usage']),
-                'avg_expense_amount': round(float(expenses_data['amount'].mean()), 2) if len(expenses_data) > 0 else 0.0,
+                'avg_expense_amount': round(float(expenses_data['amount'].mean()), 2) if len(expenses_data) > 0 else 0,
                 'expense_count': int(len(expenses_data))
             })
-
+        
         # ML insights
         ml_insights = CFOReportService._get_ml_insights()
-
+        
         # Approval statistics
-        status_counts = {
-            str(k): int(v) for k, v in expenses_df['status'].value_counts().to_dict().items()
-        }
-
-        # Assemble final report
-        report = {
+        status_counts = expenses_df['status'].value_counts().to_dict()
+        
+        return {
             'generated_at': datetime.now().isoformat(),
             'report_period': 'current_month',
             'budget_utilization': budget_utilization,
-            'department_summary': jsonable_encoder(dept_summary.to_dict()),
+            'department_summary': department_summary_simple,
             'ml_insights': ml_insights,
             'approval_statistics': status_counts,
             'total_expenses_processed': int(len(expenses_df)),
             'total_amount_processed': float(expenses_df['amount'].sum()),
             'risk_assessment': CFOReportService._get_risk_assessment()
         }
-
-        # Return JSON-encodable version
-        return jsonable_encoder(report)
-
+    
     @staticmethod
     def _get_ml_insights() -> Dict[str, Any]:
         """Get ML model insights and performance"""
         if len(expenses_df) == 0:
             return {}
-
+            
         # Calculate anomaly statistics
         anomaly_stats = {
             'total_anomalies_detected': int(expenses_df['ml_anomaly'].sum()),
-            'anomaly_rate': round(
-                float(expenses_df['ml_anomaly'].sum() / len(expenses_df) * 100), 2
-            ),
-            'avg_anomaly_confidence': round(float(expenses_df['anomaly_confidence'].mean()), 4),
+            'anomaly_rate': float((expenses_df['ml_anomaly'].sum() / len(expenses_df)) * 100),
+            'avg_anomaly_confidence': float(expenses_df['anomaly_confidence'].mean()),
             'high_confidence_anomalies': int(len(expenses_df[expenses_df['anomaly_confidence'] > 0.7]))
         }
-
+        
         # Department risk analysis
         dept_risk = expenses_df.groupby('department').agg({
             'ml_anomaly': 'mean',
             'anomaly_confidence': 'mean',
             'amount': 'sum'
         }).round(4)
-
-        anomaly_stats['high_risk_departments'] = {
-            str(k): float(v) for k, v in dept_risk['ml_anomaly'].to_dict().items()
-        }
-
-        # Model performance (mock metrics)
+        
+        # Convert to native Python types
+        high_risk_departments = {}
+        for dept, risk in dept_risk['ml_anomaly'].items():
+            high_risk_departments[dept] = float(risk)
+        
+        anomaly_stats['high_risk_departments'] = high_risk_departments
+        
+        # Model performance (mock - in production would use actual metrics)
         anomaly_stats['model_performance'] = {
             'estimated_precision': 0.82,
             'estimated_recall': 0.75,
             'estimated_f1_score': 0.78,
             'training_size': int(len(expenses_df)),
-            'model_status': bool(ml_detector.ml_detector.is_trained)
+            'model_status': ml_detector.ml_detector.is_trained
         }
-
+        
         return anomaly_stats
-
+    
     @staticmethod
     def _get_risk_assessment() -> Dict[str, Any]:
         """Generate risk assessment for CFO"""
         risks = []
-
+        
         # Budget risks
         for dept in departments_df['department']:
-            dept_data = departments_df.loc[departments_df['department'] == dept].iloc[0]
-            utilization = (
-                float(dept_data['budget_usage']) / float(dept_data['monthly_budget'])
-            ) * 100 if dept_data['monthly_budget'] > 0 else 0.0
-
+            dept_data = departments_df[departments_df['department'] == dept].iloc[0]
+            utilization = (dept_data['budget_usage'] / dept_data['monthly_budget']) * 100
+            
             if utilization > 90:
                 risks.append(f"{dept} department exceeding 90% budget utilization")
             elif utilization > 80:
                 risks.append(f"{dept} department approaching budget limit ({utilization:.1f}%)")
-
+        
         # Anomaly risks
         high_risk_expenses = expenses_df[expenses_df['anomaly_confidence'] > 0.7]
         if len(high_risk_expenses) > 5:
             risks.append(f"Multiple high-confidence anomalies detected ({len(high_risk_expenses)})")
-
+        
         # Employee risks
         employee_submissions = expenses_df['employee_id'].value_counts()
         frequent_submitters = employee_submissions[employee_submissions > 5]
         if len(frequent_submitters) > 0:
-            risks.append(f"Frequent submitters: {', '.join(map(str, frequent_submitters.index))}")
-
-        risk_level = 'HIGH' if len(risks) > 3 else 'MEDIUM' if len(risks) > 1 else 'LOW'
-
+            risks.append(f"Frequent submitters: {', '.join(frequent_submitters.index)}")
+        
         return {
-            'risk_level': risk_level,
+            'risk_level': 'HIGH' if len(risks) > 3 else 'MEDIUM' if len(risks) > 1 else 'LOW',
             'identified_risks': risks,
-            'risk_count': int(len(risks))
+            'risk_count': len(risks)
         }
-
 
 # Learning and Governance Service
 class LearningGovernanceService:
@@ -346,11 +380,20 @@ class LearningGovernanceService:
         if not audit_trail:
             return {}
             
+        # Use the original audit_trail which has datetime objects
         df = pd.DataFrame(audit_trail)
-        # Remove date-based filtering since we don't have submission dates
+        
+        # Count recent activity using datetime objects
+        today = date.today()
+        recent_activity = 0
+        for record in audit_trail:
+            if record['timestamp'].date() == today:
+                recent_activity += 1
+        
         return {
             'total_actions': len(audit_trail),
-            'actions_by_type': df['action'].value_counts().to_dict()
+            'actions_by_type': df['action'].value_counts().to_dict(),
+            'recent_activity': recent_activity
         }
 
 # API Endpoints
@@ -435,7 +478,7 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
         'amount': expense.amount,
         'purpose': expense.purpose,
         'status': final_status,
-        
+        'submission_date': datetime.now(),
         'anomaly_confidence': anomaly_result['confidence_score'],
         'ml_anomaly': anomaly_result['is_anomalous']
     }
@@ -523,13 +566,12 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
 async def get_cfo_report():
     """Generate CFO summary report"""
     report = CFOReportService.generate_report()
-
-    # Notify CFO only if risk is medium or high
-    risk_level = report['risk_assessment'].get('risk_level', 'LOW')
-    if risk_level in ['HIGH', 'MEDIUM']:
+    
+    # Notify CFO if high risk
+    if report['risk_assessment']['risk_level'] in ['HIGH', 'MEDIUM']:
         NotificationService.notify_cfo(report)
-
-    return jsonable_encoder(report)
+    
+    return report
 
 @app.get("/departments/")
 async def get_departments():
@@ -611,12 +653,16 @@ async def get_audit_trail(
     
     paginated_trail = audit_trail[start_idx:end_idx]
     
-    # Convert datetime to string for JSON serialization
+    # Create a copy for serialization without modifying the original
+    serializable_trail = []
     for record in paginated_trail:
-        record['timestamp'] = record['timestamp'].isoformat()
+        serializable_record = record.copy()
+        # Convert datetime to string for JSON serialization
+        serializable_record['timestamp'] = serializable_record['timestamp'].isoformat()
+        serializable_trail.append(serializable_record)
     
     return {
-        "data": paginated_trail,
+        "data": serializable_trail,
         "pagination": {
             "page": page,
             "size": size,
@@ -656,9 +702,9 @@ async def get_ml_info():
     if len(expenses_df) > 0:
         anomaly_stats = {
             "total_expenses": len(expenses_df),
-            "anomalies_detected": expenses_df['ml_anomaly'].sum(),
-            "anomaly_rate": (expenses_df['ml_anomaly'].sum() / len(expenses_df)) * 100,
-            "avg_confidence": expenses_df['anomaly_confidence'].mean()
+            "anomalies_detected": int(expenses_df['ml_anomaly'].sum()),
+            "anomaly_rate": float((expenses_df['ml_anomaly'].sum() / len(expenses_df)) * 100),
+            "avg_confidence": float(expenses_df['anomaly_confidence'].mean())
         }
         detector_info["performance"] = anomaly_stats
     
@@ -679,10 +725,9 @@ async def get_ml_features():
                                 "emp_median_amount", "emp_max_amount", "emp_z_score_mean", "emp_z_score_median"],
             "department_behavior": ["dept_submission_count", "dept_mean_amount", "dept_std_amount",
                                   "dept_median_amount", "dept_z_score", "dept_95th_percentile"],
-            "purpose_encoding": ["purpose_encoded"],
+            "purpose_temporal": ["purpose_encoded", "day_of_month", "day_of_week"],
             "interaction": ["amount_purpose_interaction", "amount_dept_ratio"]
-        },
-        "note": "Temporal features removed as submission_date is no longer available"
+        }
     }
 
 # Background tasks
@@ -750,8 +795,3 @@ if __name__ == "__main__":
         log_level="info",
         reload=True  # Enable auto-reload for development
     )
-
-
-
-
-
