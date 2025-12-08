@@ -9,6 +9,13 @@ import json
 import os
 from ml_anomaly_detector import EnsembleAnomalyDetector
 import random
+from twilio.rest import Client
+from dotenv import load_dotenv
+import asyncio
+from enum import Enum
+
+# Load environment variables
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +24,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Expense Management API with ML Anomaly Detection",
     description="A comprehensive expense management system with ML-powered anomaly detection and policy enforcement",
-    version="2.0.0",
+    version="2.1.0",  # Updated version
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -50,7 +57,8 @@ departments_data = {
     'auto_approve_limit': [225.75, 246.97, 128.81, 280.34],
     'escalation_limit': [655.14, 673.51, 433.31, 826.38],
     'budget_usage': [28444.48, 34081.32, 11335.48, 30276.76],
-    'budget_reset_date': [date.today().replace(day=1)] * 4
+    'budget_reset_date': [date.today().replace(day=1)] * 4,
+    'manager_phone': ['+917879287098', '+917879287098', '+917879287098', '+917879287098']  # Manager phone numbers
 }
 
 expenses_df = pd.DataFrame(expenses_data)
@@ -61,6 +69,171 @@ ml_detector = EnsembleAnomalyDetector()
 
 # Audit trail for learning and governance
 audit_trail = []
+
+# Twilio Configuration
+class AlertType(Enum):
+    ANOMALY_DETECTED = "anomaly_detected"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    ESCALATION_REQUIRED = "escalation_required"
+    CFO_REPORT_READY = "cfo_report_ready"
+    EXPENSE_APPROVED = "expense_approved"
+    EXPENSE_REJECTED = "expense_rejected"
+
+class MessagingService:
+    """Service for sending alerts and notifications via Twilio"""
+    
+    def __init__(self):
+        self.account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+        self.auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+        self.whatsapp_from = os.getenv("TWILIO_WHATSAPP_FROM")
+        self.sms_from = os.getenv("TWILIO_SMS_FROM")
+        self.content_sid = os.getenv("CONTENT_SID")
+        self.client = None
+        self.is_configured = False
+        
+        if all([self.account_sid, self.auth_token]):
+            try:
+                self.client = Client(self.account_sid, self.auth_token)
+                self.is_configured = True
+                logger.info("Twilio messaging service initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize Twilio client: {e}")
+        else:
+            logger.warning("Twilio credentials not found. Messaging service will run in simulation mode.")
+    
+    async def send_alert(self, 
+                        alert_type: AlertType, 
+                        recipient_phone: str, 
+                        expense_data: Optional[Dict] = None,
+                        department_data: Optional[Dict] = None,
+                        report_data: Optional[Dict] = None) -> Dict[str, Any]:
+        """Send alert message based on alert type"""
+        
+        if not self.is_configured:
+            logger.warning(f"SIMULATION: Would send {alert_type.value} alert to {recipient_phone}")
+            return {"status": "simulated", "message": "Messaging service not configured"}
+        
+        try:
+            # Determine message content based on alert type
+            message_data = self._prepare_message_content(
+                alert_type, 
+                expense_data or {},  # Provide empty dict if None
+                department_data or {},  # Provide empty dict if None
+                report_data or {}  # Provide empty dict if None
+            )
+            
+            # Send message
+            if self.whatsapp_from and "whatsapp:" in self.whatsapp_from:
+                # Send WhatsApp message
+                message = self.client.messages.create(
+                    from_=self.whatsapp_from,
+                    body=message_data["body"],
+                    to=f"whatsapp:{recipient_phone}"
+                )
+            else:
+                # Send SMS
+                message = self.client.messages.create(
+                    body=message_data["body"],
+                    from_=self.sms_from or self.whatsapp_from,
+                    to=recipient_phone
+                )
+            
+            # Log the alert
+            alert_record = {
+                "timestamp": datetime.now(),
+                "alert_type": alert_type.value,
+                "recipient": recipient_phone,
+                "message_sid": message.sid,
+                "status": message.status,
+                "content": message_data["body"][:100] + "..." if len(message_data["body"]) > 100 else message_data["body"]
+            }
+            audit_trail.append(alert_record)
+            
+            logger.info(f"Alert sent: {alert_type.value} to {recipient_phone} (SID: {message.sid})")
+            
+            return {
+                "status": "sent",
+                "message_sid": message.sid,
+                "status_code": message.status,
+                "recipient": recipient_phone,
+                "alert_type": alert_type.value
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to send alert: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "alert_type": alert_type.value
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to send alert: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "alert_type": alert_type.value
+            }
+    
+    def _prepare_message_content(self, alert_type: AlertType, expense_data: Optional[Dict], 
+                                department_data: Optional[Dict], report_data: Optional[Dict]) -> Dict[str, str]:
+        """Prepare message content based on alert type"""
+        
+        templates = {
+            AlertType.ANOMALY_DETECTED: {
+                "body": f"""🚨 EXPENSE ANOMALY DETECTED
+Expense ID: {expense_data.get('expense_id', 'N/A')}
+Employee: {expense_data.get('employee_id', 'N/A')}
+Amount: ${expense_data.get('amount', 0):.2f}
+Purpose: {expense_data.get('purpose', 'N/A')}
+Confidence: {expense_data.get('confidence_score', 0):.1%}
+Reason: {expense_data.get('reasoning', 'Suspicious pattern detected')}
+Action Required: Please review at your earliest convenience."""
+            },
+            AlertType.BUDGET_EXCEEDED: {
+                "body": f"""⚠️ BUDGET ALERT: {department_data.get('department', 'Department')}
+Current Usage: ${department_data.get('budget_usage', 0):.2f} / ${department_data.get('monthly_budget', 0):.2f}
+Utilization: {(department_data.get('budget_usage', 0) / department_data.get('monthly_budget', 1) * 100):.1f}%
+Status: {"EXCEEDED" if department_data.get('budget_usage', 0) > department_data.get('monthly_budget', 0) else "CRITICAL"}
+Action: Review department expenses and consider budget adjustment."""
+            },
+            AlertType.ESCALATION_REQUIRED: {
+                "body": f"""🔔 ESCALATION REQUIRED
+Expense ID: {expense_data.get('expense_id', 'N/A')}
+Amount: ${expense_data.get('amount', 0):.2f} (Limit: ${department_data.get('escalation_limit', 0):.2f})
+Employee: {expense_data.get('employee_id', 'N/A')}
+Department: {expense_data.get('department', 'N/A')}
+Action: Senior approval required. Please review in the system."""
+            },
+            AlertType.CFO_REPORT_READY: {
+                "body": f"""📊 CFO REPORT ALERT
+Monthly expense report is ready.
+Total Expenses: {report_data.get('total_expenses_processed', 0)}
+Total Amount: ${report_data.get('total_amount_processed', 0):.2f}
+Anomaly Rate: {report_data.get('ml_insights', {}).get('anomaly_rate', 0):.1f}%
+Risk Level: {report_data.get('risk_assessment', {}).get('risk_level', 'N/A')}
+Access: /cfo/report endpoint"""
+            },
+            AlertType.EXPENSE_APPROVED: {
+                "body": f"""✅ EXPENSE APPROVED
+Expense ID: {expense_data.get('expense_id', 'N/A')}
+Amount: ${expense_data.get('amount', 0):.2f}
+Approved By: {expense_data.get('reviewer', 'System')}
+Status: Approved and processed."""
+            },
+            AlertType.EXPENSE_REJECTED: {
+                "body": f"""❌ EXPENSE REJECTED
+Expense ID: {expense_data.get('expense_id', 'N/A')}
+Amount: ${expense_data.get('amount', 0):.2f}
+Rejected By: {expense_data.get('reviewer', 'System')}
+Reason: {expense_data.get('comments', 'Policy violation')}"""
+            }
+        }
+        
+        return templates.get(alert_type, {"body": "Alert: Action required in expense management system."})
+
+# Initialize messaging service
+messaging_service = MessagingService()
 
 # Pydantic Models
 class ExpenseSubmission(BaseModel):
@@ -87,16 +260,20 @@ class ExpenseResponse(BaseModel):
     confidence_score: Optional[float] = None
     needs_human_review: bool
     anomaly_details: Optional[Dict[str, Any]] = None
+    alert_sent: Optional[bool] = False
+    alert_details: Optional[Dict[str, Any]] = None
 
 class DepartmentUpdate(BaseModel):
     monthly_budget: Optional[float] = Field(None, gt=0)
     auto_approve_limit: Optional[float] = Field(None, gt=0)
     escalation_limit: Optional[float] = Field(None, gt=0)
+    manager_phone: Optional[str] = Field(None, pattern=r'^\+\d{10,15}$', description="Manager phone number in E.164 format")
 
 class ApprovalDecision(BaseModel):
     approved: bool
     reviewer: str = Field(..., min_length=2)
     comments: Optional[str] = Field(None, max_length=500)
+    send_notification: Optional[bool] = Field(True, description="Send notification to employee")
 
 class MLTrainingResponse(BaseModel):
     status: str
@@ -104,14 +281,22 @@ class MLTrainingResponse(BaseModel):
     anomalies_detected: Optional[int] = None
     error: Optional[str] = None
 
-# Policy Check Service
+class AlertRequest(BaseModel):
+    alert_type: AlertType
+    recipient_phone: str = Field(..., pattern=r'^\+\d{10,15}$')
+    expense_id: Optional[int] = None
+    department: Optional[str] = None
+    custom_message: Optional[str] = Field(None, max_length=500)
+
+# Enhanced Policy Check Service with Alert Integration
 class PolicyChecker:
     @staticmethod
-    def check_policy(expense: ExpenseSubmission, department_data: pd.Series) -> Dict[str, Any]:
-        """Check expense against department policies"""
+    async def check_policy(expense: ExpenseSubmission, department_data: pd.Series) -> Dict[str, Any]:
+        """Check expense against department policies with alert triggers"""
         reasoning = []
         needs_human_review = False
         confidence_score = 1.0
+        alerts = []
         
         # Auto-approval check
         if expense.amount <= department_data['auto_approve_limit']:
@@ -123,6 +308,7 @@ class PolicyChecker:
             status = "escalated"
             needs_human_review = True
             confidence_score = 0.7
+            alerts.append(AlertType.ESCALATION_REQUIRED)
         # Normal approval
         else:
             reasoning.append(f"Amount (${expense.amount:.2f}) requires standard approval (limit: ${department_data['auto_approve_limit']:.2f})")
@@ -137,9 +323,12 @@ class PolicyChecker:
             status = "budget_exceeded"
             needs_human_review = True
             confidence_score = 0.5
+            alerts.append(AlertType.BUDGET_EXCEEDED)
         elif expense.amount > remaining_budget * 0.8:
             reasoning.append(f"Warning: Expense uses more than 80% of remaining budget (${remaining_budget:.2f})")
             confidence_score *= 0.8
+            if remaining_budget * 0.1 < expense.amount:  # If using >10% of remaining budget
+                alerts.append(AlertType.BUDGET_EXCEEDED)
         
         # Purpose-based checks
         if expense.purpose == "Client Entertainment" and expense.amount > 1000:
@@ -150,15 +339,54 @@ class PolicyChecker:
             "status": status,
             "reasoning": "; ".join(reasoning),
             "needs_human_review": needs_human_review,
-            "confidence_score": confidence_score
+            "confidence_score": confidence_score,
+            "alerts": alerts
         }
 
-# Notification Service (Mock)
+# Enhanced Notification Service with Twilio Integration
 class NotificationService:
     @staticmethod
-    def notify_approver(expense_id: int, employee_id: str, department: str, amount: float, 
-                       purpose: str, reasoning: str, confidence_score: float, anomaly_details: Dict):
-        """Mock function to notify approvers"""
+    async def notify_approver(expense_id: int, employee_id: str, department: str, amount: float, 
+                             purpose: str, reasoning: str, confidence_score: float, 
+                             anomaly_details: Dict, alert_type: AlertType = AlertType.ANOMALY_DETECTED):
+        """Notify approvers via multiple channels"""
+        
+        try:
+            # Get manager phone number from department data
+            dept_data = departments_df[departments_df['department'] == department]
+            
+            # Check if department data exists and has manager_phone
+            if not dept_data.empty and 'manager_phone' in dept_data.columns:
+                manager_phone = dept_data.iloc[0]['manager_phone']
+                
+                # Prepare expense data for alert
+                expense_data = {
+                    'expense_id': expense_id,
+                    'employee_id': employee_id,
+                    'department': department,
+                    'amount': amount,
+                    'purpose': purpose,
+                    'reasoning': reasoning,
+                    'confidence_score': confidence_score
+                }
+                
+                # Send alert via Twilio if manager phone exists
+                if manager_phone and pd.notna(manager_phone):
+                    await messaging_service.send_alert(
+                        alert_type=alert_type,
+                        recipient_phone=manager_phone,
+                        expense_data=expense_data,
+                        department_data=dept_data.iloc[0].to_dict() if not dept_data.empty else None
+                    )
+                else:
+                    logger.warning(f"No valid manager phone for department {department}")
+            else:
+                logger.warning(f"Department {department} not found or no manager phone configured")
+        
+        except Exception as e:
+            logger.error(f"Error in notify_approver: {e}")
+        
+        # Also log to console for backup (this part is working)
         message = f"""
         EXPENSE REVIEW REQUIRED
         ======================
@@ -177,10 +405,20 @@ class NotificationService:
         Please review and approve/reject this expense.
         """
         logger.info(f"APPROVAL NOTIFICATION:\n{message}")
-        
+    
     @staticmethod
-    def notify_cfo(report_data: Dict):
+    async def notify_cfo(report_data: Dict):
         """Notify CFO of significant events"""
+        # Send alert to CFO
+        cfo_phone = os.getenv("CFO_PHONE_NUMBER")
+        if cfo_phone:
+            await messaging_service.send_alert(
+                alert_type=AlertType.CFO_REPORT_READY,
+                recipient_phone=cfo_phone,
+                report_data=report_data
+            )
+        
+        # Also log to console
         message = f"""
         CFO ALERT: Monthly Expense Report
         ================================
@@ -193,7 +431,7 @@ class NotificationService:
         """
         logger.info(f"CFO NOTIFICATION:\n{message}")
 
-# CFO Reporting Service
+# CFO Reporting Service remains the same
 class CFOReportService:
     @staticmethod
     def _convert_to_serializable(obj):
@@ -400,21 +638,29 @@ class LearningGovernanceService:
 @app.get("/")
 async def root():
     return {
-        "message": "Welcome to Expense Management API with ML Anomaly Detection",
-        "version": "2.0.0",
+        "message": "Welcome to Expense Management API with ML Anomaly Detection & Alert System",
+        "version": "2.1.0",
         "status": "operational",
+        "features": {
+            "ml_anomaly_detection": True,
+            "twilio_alerts": messaging_service.is_configured,
+            "cfo_reporting": True,
+            "audit_trail": True
+        },
         "endpoints": {
             "submit_expense": "POST /expenses/submit",
             "review_expense": "POST /expenses/{id}/review", 
             "cfo_report": "GET /cfo/report",
             "ml_training": "POST /ml/retrain",
-            "audit_trail": "GET /audit/trail"
+            "audit_trail": "GET /audit/trail",
+            "send_alert": "POST /alerts/send",
+            "messaging_status": "GET /messaging/status"
         }
     }
 
 @app.post("/expenses/submit", response_model=ExpenseResponse)
 async def submit_expense(expense: ExpenseSubmission, background_tasks: BackgroundTasks):
-    """Submit a new expense for processing with ML anomaly detection"""
+    """Submit a new expense for processing with ML anomaly detection and alerts"""
 
     global expenses_df
     
@@ -429,7 +675,7 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
     dept_data = departments_df[departments_df['department'] == expense.department].iloc[0]
     
     # Policy check
-    policy_result = PolicyChecker.check_policy(expense, dept_data)
+    policy_result = await PolicyChecker.check_policy(expense, dept_data)
     
     # ML Anomaly detection
     current_expense_dict = {
@@ -452,6 +698,9 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
         "is_anomalous": anomaly_result["is_anomalous"]
     }
     
+    alert_sent = False
+    alert_details = None
+    
     if anomaly_result['is_anomalous']:
         final_status = "suspicious"
         anomaly_details.update({
@@ -469,6 +718,28 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
             final_reasoning += f"; Anomalies: {', '.join(anomaly_reasons)}"
         
         final_confidence *= 0.5
+        
+        # Trigger alert for anomaly
+        background_tasks.add_task(
+            NotificationService.notify_approver,
+            expense_id, expense.employee_id, expense.department, expense.amount,
+            expense.purpose, final_reasoning, final_confidence, anomaly_details,
+            AlertType.ANOMALY_DETECTED
+        )
+        alert_sent = True
+        alert_details = {"type": "anomaly_detected", "timestamp": datetime.now().isoformat()}
+    
+    # Check if any policy alerts need to be sent
+    if policy_result.get('alerts'):
+        for alert_type in policy_result['alerts']:
+            background_tasks.add_task(
+                NotificationService.notify_approver,
+                expense_id, expense.employee_id, expense.department, expense.amount,
+                expense.purpose, final_reasoning, final_confidence, anomaly_details,
+                alert_type
+            )
+            alert_sent = True
+            alert_details = {"type": alert_type.value, "timestamp": datetime.now().isoformat()}
     
     # Add to expenses database
     new_expense = {
@@ -480,7 +751,8 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
         'status': final_status,
         'submission_date': datetime.now(),
         'anomaly_confidence': anomaly_result['confidence_score'],
-        'ml_anomaly': anomaly_result['is_anomalous']
+        'ml_anomaly': anomaly_result['is_anomalous'],
+        'alert_sent': alert_sent
     }
     
     
@@ -496,18 +768,12 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
     
     # Trigger human review if needed
     needs_review = policy_result['needs_human_review'] or anomaly_result['is_anomalous']
-    if needs_review:
-        background_tasks.add_task(
-            NotificationService.notify_approver,
-            expense_id, expense.employee_id, expense.department, expense.amount,
-            expense.purpose, final_reasoning, final_confidence, anomaly_details
-        )
     
     # Record in audit trail
     LearningGovernanceService.record_decision(
         expense_id, "submission", final_reasoning, "system",
-        f"ML_confidence: {anomaly_result['confidence_score']:.3f}",
-        {"anomaly_result": anomaly_result}
+        f"ML_confidence: {anomaly_result['confidence_score']:.3f}, Alert_sent: {alert_sent}",
+        {"anomaly_result": anomaly_result, "alert_sent": alert_sent}
     )
     
     return ExpenseResponse(
@@ -520,12 +786,14 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
         reasoning=final_reasoning,
         confidence_score=final_confidence,
         needs_human_review=needs_review,
-        anomaly_details=anomaly_details
+        anomaly_details=anomaly_details,
+        alert_sent=alert_sent,
+        alert_details=alert_details
     )
 
 @app.post("/expenses/{expense_id}/review")
 async def review_expense(expense_id: int, decision: ApprovalDecision):
-    """Human review endpoint for expenses"""
+    """Human review endpoint for expenses with optional notifications"""
     
     if expense_id > len(expenses_df) or expense_id < 1:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -545,13 +813,39 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
         amount = expense['amount']
         departments_df.loc[departments_df['department'] == dept, 'budget_usage'] += amount
     
+    # Send notification if requested
+    if decision.send_notification:
+        # Get employee manager phone (in production, you'd have an employee-manager mapping)
+        dept_data = departments_df[departments_df['department'] == expense['department']]
+        if not dept_data.empty and 'manager_phone' in dept_data.columns:
+            manager_phone = dept_data.iloc[0]['manager_phone']
+            
+            expense_data = {
+                'expense_id': expense_id,
+                'amount': expense['amount'],
+                'reviewer': decision.reviewer,
+                'comments': decision.comments
+            }
+            
+            alert_type = AlertType.EXPENSE_APPROVED if decision.approved else AlertType.EXPENSE_REJECTED
+            
+            # Send alert in background
+            asyncio.create_task(
+                messaging_service.send_alert(
+                    alert_type=alert_type,
+                    recipient_phone=manager_phone,
+                    expense_data=expense_data
+                )
+            )
+    
     # Record decision
     reasoning = f"Manual review: {'approved' if decision.approved else 'rejected'} by {decision.reviewer}"
     if decision.comments:
         reasoning += f". Comments: {decision.comments}"
     
     LearningGovernanceService.record_decision(
-        expense_id, f"review_{new_status}", reasoning, decision.reviewer, decision.comments
+        expense_id, f"review_{new_status}", reasoning, decision.reviewer, 
+        decision.comments, {"notification_sent": decision.send_notification}
     )
     
     return {
@@ -559,17 +853,18 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
         "expense_id": expense_id,
         "reviewer": decision.reviewer,
         "status": new_status,
-        "comments": decision.comments
+        "comments": decision.comments,
+        "notification_sent": decision.send_notification
     }
 
 @app.get("/cfo/report")
-async def get_cfo_report():
-    """Generate CFO summary report"""
+async def get_cfo_report(background_tasks: BackgroundTasks):
+    """Generate CFO summary report with alert notification"""
     report = CFOReportService.generate_report()
     
-    # Notify CFO if high risk
+    # Notify CFO if high risk in background
     if report['risk_assessment']['risk_level'] in ['HIGH', 'MEDIUM']:
-        NotificationService.notify_cfo(report)
+        background_tasks.add_task(NotificationService.notify_cfo, report)
     
     return report
 
@@ -672,6 +967,85 @@ async def get_audit_trail(
         "statistics": LearningGovernanceService.get_audit_stats()
     }
 
+# Messaging Endpoints
+@app.post("/alerts/send")
+async def send_custom_alert(alert_request: AlertRequest):
+    """Send a custom alert to a specific recipient"""
+    
+    # Validate department if provided
+    if alert_request.department and alert_request.department not in departments_df['department'].values:
+        raise HTTPException(status_code=400, detail="Invalid department")
+    
+    # Get expense data if expense_id is provided
+    expense_data = None
+    if alert_request.expense_id:
+        if alert_request.expense_id > len(expenses_df) or alert_request.expense_id < 1:
+            raise HTTPException(status_code=404, detail="Expense not found")
+        expense_data = expenses_df.iloc[alert_request.expense_id - 1].to_dict()
+    
+    # Send alert
+    result = await messaging_service.send_alert(
+        alert_type=alert_request.alert_type,
+        recipient_phone=alert_request.recipient_phone,
+        expense_data=expense_data,
+        department_data=departments_df[departments_df['department'] == alert_request.department].iloc[0].to_dict() if alert_request.department else None
+    )
+    
+    return {
+        "message": "Alert sent successfully",
+        "result": result,
+        "alert_type": alert_request.alert_type.value,
+        "recipient": alert_request.recipient_phone
+    }
+
+@app.get("/messaging/status")
+async def get_messaging_status():
+    """Get the status of the messaging service"""
+    return {
+        "service": "Twilio Messaging",
+        "configured": messaging_service.is_configured,
+        "status": "operational" if messaging_service.is_configured else "not_configured",
+        "capabilities": {
+            "whatsapp": bool(messaging_service.whatsapp_from),
+            "sms": bool(messaging_service.sms_from),
+            "templates": bool(messaging_service.content_sid)
+        }
+    }
+
+@app.get("/alerts/history")
+async def get_alert_history(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100)
+):
+    """Get history of sent alerts"""
+    # Filter audit trail for alert entries
+    alert_records = [record for record in audit_trail if 'alert_type' in record]
+    
+    start_idx = (page - 1) * size
+    end_idx = start_idx + size
+    paginated_alerts = alert_records[start_idx:end_idx]
+    
+    # Create a copy for serialization
+    serializable_alerts = []
+    for record in paginated_alerts:
+        serializable_record = record.copy()
+        serializable_record['timestamp'] = serializable_record['timestamp'].isoformat()
+        serializable_alerts.append(serializable_record)
+    
+    return {
+        "data": serializable_alerts,
+        "pagination": {
+            "page": page,
+            "size": size,
+            "total": len(alert_records),
+            "pages": (len(alert_records) + size - 1) // size
+        },
+        "summary": {
+            "total_alerts": len(alert_records),
+            "alerts_by_type": pd.DataFrame(alert_records)['alert_type'].value_counts().to_dict() if alert_records else {}
+        }
+    }
+
 # ML Endpoints
 @app.post("/ml/retrain", response_model=MLTrainingResponse)
 async def retrain_ml_model():
@@ -746,9 +1120,10 @@ async def retrain_ml_model_background():
 @app.on_event("startup")
 async def startup_event():
     """Initialize system and train ML model on startup"""
-    logger.info("Expense Management API with ML Anomaly Detection starting up...")
+    logger.info("Expense Management API with ML Anomaly Detection & Alert System starting up...")
     logger.info(f"Loaded {len(expenses_df)} existing expenses")
     logger.info(f"Tracking {len(departments_df)} departments")
+    logger.info(f"Messaging service: {'CONFIGURED' if messaging_service.is_configured else 'SIMULATION MODE'}")
     
     # Train ML model on historical data
     try:
@@ -779,8 +1154,12 @@ async def health_check():
                 "trained": ml_detector.ml_detector.is_trained,
                 "status": "operational"
             },
+            "messaging": {
+                "configured": messaging_service.is_configured,
+                "status": "operational" if messaging_service.is_configured else "simulation"
+            },
             "system": {
-                "version": "2.0.0",
+                "version": "2.1.0",
                 "uptime": "running"
             }
         }
