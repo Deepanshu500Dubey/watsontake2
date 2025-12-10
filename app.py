@@ -1041,7 +1041,29 @@ async def view_expense_dashboard(expense_id: int):
     # Get department data
     dept_data = departments_df[departments_df['department'] == expense['department']]
     dept_info = dept_data.iloc[0] if not dept_data.empty else {}
-    
+
+    # ---------- FIXED: Approval Actions Block ----------
+    if expense['status'] in ['pending', 'escalated', 'suspicious', 'budget_exceeded']:
+        approval_html = f"""
+        <div class="card">
+            <h2>Approval Actions</h2>
+            <p>
+                <a href="/expenses/{expense_id}/approve/{expense['approval_token']}?reviewer=Dashboard"
+                   class="btn btn-approve" onclick="return confirm('Approve this expense?')">
+                   Approve Expense
+                </a>
+                
+                <a href="/expenses/{expense_id}/reject/{expense['approval_token']}?reviewer=Dashboard&reason=Policy+violation"
+                   class="btn btn-reject" onclick="return confirm('Reject this expense?')">
+                   Reject Expense
+                </a>
+            </p>
+        </div>
+        """
+    else:
+        approval_html = ""
+    # ----------------------------------------------------
+
     html_content = f"""
     <!DOCTYPE html>
     <html>
@@ -1101,7 +1123,7 @@ async def view_expense_dashboard(expense_id: int):
                     </div>
                 </div>
             </div>
-            
+
             <div class="card">
                 <h2>Department Policy</h2>
                 <div class="details-grid">
@@ -1123,17 +1145,9 @@ async def view_expense_dashboard(expense_id: int):
                     </div>
                 </div>
             </div>
-            
-            {"<div class='card'><h2>Approval Actions</h2>" + 
-            f"""
-            <p>
-                <a href="/expenses/{expense_id}/approve/{expense['approval_token']}?reviewer=Dashboard" 
-                   class="btn btn-approve" onclick="return confirm('Approve this expense?')"> Approve Expense</a>
-                <a href="/expenses/{expense_id}/reject/{expense['approval_token']}?reviewer=Dashboard&reason=Policy+violation" 
-                   class="btn btn-reject" onclick="return confirm('Reject this expense?')"> Reject Expense</a>
-            </p>
-            """ + "</div>" if expense['status'] in ['pending', 'escalated', 'suspicious', 'budget_exceeded'] else ""}
-            
+
+            {approval_html}
+
             <div class="card">
                 <a href="/dashboard" class="btn btn-back">← Back to Dashboard</a>
                 <a href="/expenses/" class="btn btn-back" target="_blank">API View</a>
@@ -1142,7 +1156,9 @@ async def view_expense_dashboard(expense_id: int):
     </body>
     </html>
     """
+
     return HTMLResponse(content=html_content)
+
 
 # Enhanced API Endpoints
 @app.post("/expenses/submit", response_model=ExpenseResponse)
@@ -1866,6 +1882,7 @@ if __name__ == "__main__":
         log_level="info",
         reload=True
     )
+
 
 
 
