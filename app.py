@@ -501,83 +501,106 @@ class NotificationService:
         
         subject = f"Expense #{expense_id} has been {decision}"
         
-        # HTML email template
-        # HTML email template
-        # In the notify_employee method, fix the HTML template:
-        html_body = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <style>
-                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                .header {{ background: {'#4CAF50' if decision == 'approved' else '#f44336'}; 
-                          color: white; padding: 20px; border-radius: 5px; text-align: center; }}
-                .content {{ margin: 20px 0; }}
-                .details {{ background: #f9f9f9; padding: 15px; border-radius: 5px; border-left: 4px solid {'#4CAF50' if decision == 'approved' else '#f44336'}; }}
-                .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h1>{'✅' if decision == 'approved' else '❌'} Expense {decision.upper()}</h1>
-                </div>
-                
-                <div class="content">
-                    <p>Dear {employee_name},</p>
-                    <p>Your expense submission has been reviewed and <strong>{decision}</strong>.</p>
-                    
-                    <div class="details">
-                        <h3>Expense Details:</h3>
-                        <p><strong>Expense ID:</strong> #{expense_id}</p>
-                        <p><strong>Amount:</strong> ${expense['amount']:.2f}</p>
-                        <p><strong>Purpose:</strong> {expense['purpose']}</p>
-                        <p><strong>Department:</strong> {expense['department']}</p>
-                        <p><strong>Submitted:</strong> {expense['submission_date'].strftime('%Y-%m-%d')}</p>
-                        <p><strong>Reviewed By:</strong> {reviewer}</p>
-                        <p><strong>Status:</strong> <span style="color: {'#4CAF50' if decision == 'approved' else '#f44336'}; 
-                            font-weight: bold;">{decision.upper()}</span></p>
-                    </div>
-                    
-                    {f'<div class="details"><h3>Reviewer Comments:</h3><p>{comments}</p></div>' if comments else ''}
-                    
-                    <p>You can view the details of this expense and other submissions at:</p>
-                    <p><a href="{APP_BASE_URL}/dashboard/expenses/{expense_id}">{APP_BASE_URL}/dashboard/expenses/{expense_id}</a></p>
-                </div>
-                
-                <div class="footer">
-                    <p>This is an automated message from the Expense Management System.</p>
-                    <p>Please do not reply to this email.</p>
-                </div>
+        # Determine colors based on decision
+        bg_color = '#4CAF50' if decision == 'approved' else '#f44336'
+        border_color = '#4CAF50' if decision == 'approved' else '#f44336'
+        emoji = '✅' if decision == 'approved' else '❌'
+        
+        # Build comments HTML if comments exist
+        comments_html = ""
+        if comments:
+            comments_html = f'<div class="details"><h3>Reviewer Comments:</h3><p>{comments}</p></div>'
+        
+        # HTML email template - using .format() instead of f-string for complex template
+        html_template = """<!DOCTYPE html>
+    <html>
+    <head>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background: {bg_color}; 
+                      color: white; padding: 20px; border-radius: 5px; text-align: center; }}
+            .content {{ margin: 20px 0; }}
+            .details {{ background: #f9f9f9; padding: 15px; border-radius: 5px; border-left: 4px solid {border_color}; }}
+            .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>{emoji} Expense {decision_upper}</h1>
             </div>
-        </body>
-        </html>
-        """
+            
+            <div class="content">
+                <p>Dear {employee_name},</p>
+                <p>Your expense submission has been reviewed and <strong>{decision}</strong>.</p>
+                
+                <div class="details">
+                    <h3>Expense Details:</h3>
+                    <p><strong>Expense ID:</strong> #{expense_id}</p>
+                    <p><strong>Amount:</strong> ${amount:.2f}</p>
+                    <p><strong>Purpose:</strong> {purpose}</p>
+                    <p><strong>Department:</strong> {department}</p>
+                    <p><strong>Submitted:</strong> {submission_date}</p>
+                    <p><strong>Reviewed By:</strong> {reviewer}</p>
+                    <p><strong>Status:</strong> <span style="color: {bg_color}; font-weight: bold;">{decision_upper}</span></p>
+                </div>
+                
+                {comments_html}
+                
+                <p>You can view the details of this expense and other submissions at:</p>
+                <p><a href="{dashboard_url}">{dashboard_url}</a></p>
+            </div>
+            
+            <div class="footer">
+                <p>This is an automated message from the Expense Management System.</p>
+                <p>Please do not reply to this email.</p>
+            </div>
+        </div>
+    </body>
+    </html>"""
+        
+        # Format the template
+        html_body = html_template.format(
+            bg_color=bg_color,
+            border_color=border_color,
+            emoji=emoji,
+            decision_upper=decision.upper(),
+            employee_name=employee_name,
+            decision=decision,
+            expense_id=expense_id,
+            amount=expense['amount'],
+            purpose=expense['purpose'],
+            department=expense['department'],
+            submission_date=expense['submission_date'].strftime('%Y-%m-%d'),
+            reviewer=reviewer,
+            comments_html=comments_html,
+            dashboard_url=f"{APP_BASE_URL}/dashboard/expenses/{expense_id}"
+        )
         
         # Plain text version
         plain_body = f"""
-        Expense {decision.upper()}
-        ======================
-        
-        Dear {employee_name},
-        
-        Your expense submission has been reviewed and {decision}.
-        
-        Expense Details:
-        - ID: #{expense_id}
-        - Amount: ${expense['amount']:.2f}
-        - Purpose: {expense['purpose']}
-        - Department: {expense['department']}
-        - Reviewed By: {reviewer}
-        - Status: {decision.upper()}
-        
-        {f'Reviewer Comments: {comments}' if comments else ''}
-        
-        View details: {APP_BASE_URL}/dashboard/expenses/{expense_id}
-        
-        This is an automated message from the Expense Management System.
-        """
+    Expense {decision.upper()}
+    ======================
+    
+    Dear {employee_name},
+    
+    Your expense submission has been reviewed and {decision}.
+    
+    Expense Details:
+    - ID: #{expense_id}
+    - Amount: ${expense['amount']:.2f}
+    - Purpose: {expense['purpose']}
+    - Department: {expense['department']}
+    - Reviewed By: {reviewer}
+    - Status: {decision.upper()}
+    
+    {f'Reviewer Comments: {comments}' if comments else ''}
+    
+    View details: {APP_BASE_URL}/dashboard/expenses/{expense_id}
+    
+    This is an automated message from the Expense Management System.
+    """
         
         # Send email
         await email_service.send_email(
@@ -588,7 +611,6 @@ class NotificationService:
         )
         
         logger.info(f"Email notification sent to employee {employee_id} about expense {expense_id} ({decision})")
-    
     @staticmethod
     async def notify_cfo(report_data: Dict):
         """Notify CFO of significant events"""
@@ -1842,5 +1864,6 @@ if __name__ == "__main__":
         log_level="info",
         reload=True
     )
+
 
 
