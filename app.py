@@ -502,6 +502,8 @@ class NotificationService:
         subject = f"Expense #{expense_id} has been {decision}"
         
         # HTML email template
+        # HTML email template
+        # In the notify_employee method, fix the HTML template:
         html_body = f"""
         <!DOCTYPE html>
         <html>
@@ -519,7 +521,7 @@ class NotificationService:
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>{'' if decision == 'approved' else '❌'} Expense {decision.upper()}</h1>
+                    <h1>{'✅' if decision == 'approved' else '❌'} Expense {decision.upper()}</h1>
                 </div>
                 
                 <div class="content">
@@ -1840,4 +1842,5 @@ if __name__ == "__main__":
         log_level="info",
         reload=True
     )
+
 
