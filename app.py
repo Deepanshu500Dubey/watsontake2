@@ -153,16 +153,16 @@ class EmailService:
                 server.login(self.smtp_username, self.smtp_password)
                 server.send_message(msg)
             
-            logger.info(f"✅ Email sent to {to_email}")
+            logger.info(f" Email sent to {to_email}")
             return {"status": "sent", "to": to_email}
             
         except smtplib.SMTPAuthenticationError as e:
-            logger.error(f"❌ SMTP Auth Error: {e}")
+            logger.error(f" SMTP Auth Error: {e}")
             logger.error("Check: 1) Use App Password not regular password 2) 2-Step Verification enabled")
             return {"status": "auth_failed", "error": "Authentication failed"}
             
         except Exception as e:
-            logger.error(f"❌ Email failed: {type(e).__name__}: {str(e)[:100]}")
+            logger.error(f" Email failed: {type(e).__name__}: {str(e)[:100]}")
             return {"status": "failed", "error": str(e)[:100]}
     
     def get_employee_email(self, employee_id: str) -> Optional[str]:
@@ -292,13 +292,13 @@ class MessagingService:
         
         if approval_token and 'expense_id' in expense_data:
             expense_id = expense_data['expense_id']
-            approve_link = f"\n✅ Approve: {APP_BASE_URL}/expenses/{expense_id}/approve/{approval_token}"
-            reject_link = f"\n❌ Reject: {APP_BASE_URL}/expenses/{expense_id}/reject/{approval_token}"
-            dashboard_link = f"\n📊 Review Dashboard: {APP_BASE_URL}/dashboard/expenses/{expense_id}"
+            approve_link = f"\n Approve: {APP_BASE_URL}/expenses/{expense_id}/approve/{approval_token}"
+            reject_link = f"\n Reject: {APP_BASE_URL}/expenses/{expense_id}/reject/{approval_token}"
+            dashboard_link = f"\n Review Dashboard: {APP_BASE_URL}/dashboard/expenses/{expense_id}"
         
         templates = {
             AlertType.ANOMALY_DETECTED: {
-                "body": f"""🚨 EXPENSE ANOMALY DETECTED
+                "body": f""" EXPENSE ANOMALY DETECTED
 Expense ID: {expense_data.get('expense_id', 'N/A')}
 Employee: {expense_data.get('employee_id', 'N/A')}
 Amount: ${expense_data.get('amount', 0):.2f}
@@ -307,17 +307,17 @@ Confidence: {expense_data.get('confidence_score', 0):.1%}
 Reason: {expense_data.get('reasoning', 'Suspicious pattern detected')}
 {dashboard_link}{approve_link}{reject_link}
 
-⚠️ Action Required: Click links above to approve/reject."""
+ Action Required: Click links above to approve/reject."""
             },
             AlertType.BUDGET_EXCEEDED: {
-                "body": f"""⚠️ BUDGET ALERT: {department_data.get('department', 'Department')}
+                "body": f""" BUDGET ALERT: {department_data.get('department', 'Department')}
 Current Usage: ${department_data.get('budget_usage', 0):.2f} / ${department_data.get('monthly_budget', 0):.2f}
 Utilization: {(department_data.get('budget_usage', 0) / department_data.get('monthly_budget', 1) * 100):.1f}%
 Status: {"EXCEEDED" if department_data.get('budget_usage', 0) > department_data.get('monthly_budget', 0) else "CRITICAL"}
 Action: Review department expenses and consider budget adjustment."""
             },
             AlertType.ESCALATION_REQUIRED: {
-                "body": f"""🔔 ESCALATION REQUIRED
+                "body": f""" ESCALATION REQUIRED
 Expense ID: {expense_data.get('expense_id', 'N/A')}
 Amount: ${expense_data.get('amount', 0):.2f} (Limit: ${department_data.get('escalation_limit', 0):.2f})
 Employee: {expense_data.get('employee_id', 'N/A')}
@@ -337,14 +337,14 @@ Risk Level: {report_data.get('risk_assessment', {}).get('risk_level', 'N/A')}
 📈 View Report: {APP_BASE_URL}/cfo/report"""
             },
             AlertType.EXPENSE_APPROVED: {
-                "body": f"""✅ EXPENSE APPROVED
+                "body": f""" EXPENSE APPROVED
 Expense ID: {expense_data.get('expense_id', 'N/A')}
 Amount: ${expense_data.get('amount', 0):.2f}
 Approved By: {expense_data.get('reviewer', 'System')}
 Status: Approved and processed."""
             },
             AlertType.EXPENSE_REJECTED: {
-                "body": f"""❌ EXPENSE REJECTED
+                "body": f""" EXPENSE REJECTED
 Expense ID: {expense_data.get('expense_id', 'N/A')}
 Amount: ${expense_data.get('amount', 0):.2f}
 Rejected By: {expense_data.get('reviewer', 'System')}
@@ -519,7 +519,7 @@ class NotificationService:
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>{'✅' if decision == 'approved' else '❌'} Expense {decision.upper()}</h1>
+                    <h1>{'' if decision == 'approved' else '❌'} Expense {decision.upper()}</h1>
                 </div>
                 
                 <div class="content">
@@ -900,7 +900,7 @@ async def dashboard_home():
     <body>
         <div class="container">
             <div class="header">
-                <h1>📊 Expense Management Dashboard</h1>
+                <h1> Expense Management Dashboard</h1>
                 <p>Real-time expense tracking and approval system</p>
             </div>
             
@@ -1102,9 +1102,9 @@ async def view_expense_dashboard(expense_id: int):
             f"""
             <p>
                 <a href="/expenses/{expense_id}/approve/{expense['approval_token']}?reviewer=Dashboard" 
-                   class="btn btn-approve" onclick="return confirm('Approve this expense?')">✅ Approve Expense</a>
+                   class="btn btn-approve" onclick="return confirm('Approve this expense?')"> Approve Expense</a>
                 <a href="/expenses/{expense_id}/reject/{expense['approval_token']}?reviewer=Dashboard&reason=Policy+violation" 
-                   class="btn btn-reject" onclick="return confirm('Reject this expense?')">❌ Reject Expense</a>
+                   class="btn btn-reject" onclick="return confirm('Reject this expense?')"> Reject Expense</a>
             </p>
             """ + "</div>" if expense['status'] in ['pending', 'escalated', 'suspicious', 'budget_exceeded'] else ""}
             
@@ -1386,7 +1386,7 @@ async def approve_expense_via_token(expense_id: int, token: str, reviewer: str =
     </head>
     <body>
         <div class="success">
-            <h1>✅ Expense Approved Successfully!</h1>
+            <h1> Expense Approved Successfully!</h1>
             <p>Expense #{expense_id} has been approved.</p>
             <p><strong>Amount:</strong> ${amount:.2f}</p>
             <p><strong>Employee:</strong> {expense['employee_id']}</p>
@@ -1453,7 +1453,7 @@ async def reject_expense_via_token(expense_id: int, token: str,
     </head>
     <body>
         <div class="rejected">
-            <h1>❌ Expense Rejected</h1>
+            <h1> Expense Rejected</h1>
             <p>Expense #{expense_id} has been rejected.</p>
             <p><strong>Amount:</strong> ${expense['amount']:.2f}</p>
             <p><strong>Employee:</strong> {expense['employee_id']}</p>
@@ -1840,3 +1840,4 @@ if __name__ == "__main__":
         log_level="info",
         reload=True
     )
+
