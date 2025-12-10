@@ -1,5 +1,6 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
-from pydantic import BaseModel, validator, Field
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+from pydantic import BaseModel, validator, Field, EmailStr
 from typing import Dict, List, Optional, Any
 import pandas as pd
 import numpy as np
@@ -13,6 +14,10 @@ from twilio.rest import Client
 from dotenv import load_dotenv
 import asyncio
 from enum import Enum
+import uuid
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # Load environment variables
 load_dotenv()
@@ -24,7 +29,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Expense Management API with ML Anomaly Detection",
     description="A comprehensive expense management system with ML-powered anomaly detection and policy enforcement",
-    version="2.1.0",  # Updated version
+    version="2.2.0",  # Updated version with email and dashboard
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -33,22 +38,34 @@ app = FastAPI(
 os.makedirs("models", exist_ok=True)
 os.makedirs("data", exist_ok=True)
 
-# Define possible values
-employees = ['E101', 'E102', 'E103', 'E104', 'E105', 'E106', 'E107', 'E108', 'E109', 'E110']
+# Define possible values with employee emails
+employees_data = {
+    'employee_id': ['E101', 'E102', 'E103', 'E104', 'E105', 'E106', 'E107', 'E108', 'E109', 'E110'],
+    'name': ['John Doe', 'Jane Smith', 'Bob Johnson', 'Alice Brown', 'Charlie Wilson', 
+             'Diana Miller', 'Edward Davis', 'Fiona Garcia', 'George Martinez', 'Helen Taylor'],
+    'email': ['deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au'],
+    'department': ['Finance', 'Engineering', 'Sales', 'HR', 'Marketing', 
+                   'Operations', 'Finance', 'Engineering', 'Sales', 'HR']
+}
+
 departments = ['Finance', 'Engineering', 'Sales', 'HR', 'Marketing', 'Operations']
 purposes = ['Travel', 'Meals', 'Supplies', 'Client Entertainment', 'Training', 'Software Subscription']
+
+# Create dataframes
+employees_df = pd.DataFrame(employees_data)
 
 # Create 200 synthetic expense records
 expenses_data = {
     'expense_id': list(range(1, 201)),
-    'employee_id': [random.choice(employees) for _ in range(200)],
+    'employee_id': [random.choice(employees_df['employee_id'].tolist()) for _ in range(200)],
     'department': [random.choice(departments) for _ in range(200)],
     'amount': [round(random.uniform(50, 2500), 2) for _ in range(200)],  # expense between $50–$2500
     'purpose': [random.choice(purposes) for _ in range(200)],
     'status': [random.choice(['approved', 'pending', 'rejected']) for _ in range(200)],
     'submission_date': [datetime.now() for _ in range(200)],
     'anomaly_confidence': [round(random.uniform(0.0, 1.0), 2) for _ in range(200)],
-    'ml_anomaly': [random.choice([False, False, False, True]) for _ in range(200)]  # ~25% anomalies
+    'ml_anomaly': [random.choice([False, False, False, True]) for _ in range(200)],  # ~25% anomalies
+    'approval_token': [str(uuid.uuid4()) for _ in range(200)]  # Add approval tokens
 }
 
 departments_data = {
@@ -58,7 +75,8 @@ departments_data = {
     'escalation_limit': [655.14, 673.51, 433.31, 826.38],
     'budget_usage': [28444.48, 34081.32, 11335.48, 30276.76],
     'budget_reset_date': [date.today().replace(day=1)] * 4,
-    'manager_phone': ['+917879287098', '+917879287098', '+917879287098', '+917879287098']  # Manager phone numbers
+    'manager_phone': ['+917879287098', '+917879287098', '+917879287098', '+917879287098'],  # Manager phone numbers
+    'manager_email': ['deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au','deepanshu.dubey@octanesolutions.com.au']
 }
 
 expenses_df = pd.DataFrame(expenses_data)
@@ -70,6 +88,9 @@ ml_detector = EnsembleAnomalyDetector()
 # Audit trail for learning and governance
 audit_trail = []
 
+# Configuration
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8000")
+
 # Twilio Configuration
 class AlertType(Enum):
     ANOMALY_DETECTED = "anomaly_detected"
@@ -78,6 +99,86 @@ class AlertType(Enum):
     CFO_REPORT_READY = "cfo_report_ready"
     EXPENSE_APPROVED = "expense_approved"
     EXPENSE_REJECTED = "expense_rejected"
+
+class EmailService:
+    """Service for sending email notifications"""
+    
+    def __init__(self):
+        self.reload_config()
+        
+    def reload_config(self):
+        """Reload configuration from environment variables"""
+        self.smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        self.smtp_username = os.getenv("SMTP_USERNAME")
+        self.smtp_password = os.getenv("SMTP_PASSWORD")
+        self.from_email = os.getenv("FROM_EMAIL", self.smtp_username)
+        self.is_configured = all([self.smtp_server, self.smtp_username, self.smtp_password])
+        
+        if self.is_configured:
+            logger.info(f"✅ Email service configured: {self.smtp_username}@{self.smtp_server}:{self.smtp_port}")
+        else:
+            logger.warning("⚠️ Email service not fully configured")
+            logger.warning(f"  SMTP_USERNAME: {'SET' if self.smtp_username else 'MISSING'}")
+            logger.warning(f"  SMTP_PASSWORD: {'SET' if self.smtp_password else 'MISSING'}")
+    
+    async def send_email(self, to_email: str, subject: str, body: str, html_body: Optional[str] = None) -> Dict[str, Any]:
+        """Send email notification"""
+        
+        if not self.is_configured:
+            logger.warning(f"📧 SIMULATION: Would send to {to_email}: {subject}")
+            return {"status": "simulated", "to": to_email}
+        
+        try:
+            # Create message
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = self.from_email
+            msg['To'] = to_email
+            
+            # Add plain text
+            msg.attach(MIMEText(body, 'plain', 'utf-8'))
+            
+            # Add HTML if provided
+            if html_body:
+                msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+            
+            logger.info(f"📧 Sending email to {to_email}...")
+            
+            # SMTP connection
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10) as server:
+                server.ehlo()
+                server.starttls()  # Secure the connection
+                server.ehlo()
+                server.login(self.smtp_username, self.smtp_password)
+                server.send_message(msg)
+            
+            logger.info(f"✅ Email sent to {to_email}")
+            return {"status": "sent", "to": to_email}
+            
+        except smtplib.SMTPAuthenticationError as e:
+            logger.error(f"❌ SMTP Auth Error: {e}")
+            logger.error("Check: 1) Use App Password not regular password 2) 2-Step Verification enabled")
+            return {"status": "auth_failed", "error": "Authentication failed"}
+            
+        except Exception as e:
+            logger.error(f"❌ Email failed: {type(e).__name__}: {str(e)[:100]}")
+            return {"status": "failed", "error": str(e)[:100]}
+    
+    def get_employee_email(self, employee_id: str) -> Optional[str]:
+        """Get employee email by ID - THIS METHOD WAS MISSING!"""
+        try:
+            employee = employees_df[employees_df['employee_id'] == employee_id]
+            if not employee.empty:
+                email = employee.iloc[0]['email']
+                logger.info(f"Found email for {employee_id}: {email}")
+                return email
+            else:
+                logger.warning(f"No employee found with ID: {employee_id}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting email for {employee_id}: {e}")
+            return None
 
 class MessagingService:
     """Service for sending alerts and notifications via Twilio"""
@@ -106,8 +207,9 @@ class MessagingService:
                         recipient_phone: str, 
                         expense_data: Optional[Dict] = None,
                         department_data: Optional[Dict] = None,
-                        report_data: Optional[Dict] = None) -> Dict[str, Any]:
-        """Send alert message based on alert type"""
+                        report_data: Optional[Dict] = None,
+                        approval_token: Optional[str] = None) -> Dict[str, Any]:
+        """Send alert message based on alert type with dashboard links"""
         
         if not self.is_configured:
             logger.warning(f"SIMULATION: Would send {alert_type.value} alert to {recipient_phone}")
@@ -119,19 +221,30 @@ class MessagingService:
                 alert_type, 
                 expense_data or {},  # Provide empty dict if None
                 department_data or {},  # Provide empty dict if None
-                report_data or {}  # Provide empty dict if None
+                report_data or {},  # Provide empty dict if None
+                approval_token
             )
             
-            # Send message
+            # FORMAT FIX: Ensure proper WhatsApp format
             if self.whatsapp_from and "whatsapp:" in self.whatsapp_from:
+                # Ensure recipient is in correct WhatsApp format
+                if not recipient_phone.startswith("whatsapp:+"):
+                    if recipient_phone.startswith("+"):
+                        recipient_phone = f"whatsapp:{recipient_phone}"
+                    else:
+                        recipient_phone = f"whatsapp:+{recipient_phone}"
+                
+                logger.info(f"Sending WhatsApp to: {recipient_phone}")
+                
                 # Send WhatsApp message
                 message = self.client.messages.create(
                     from_=self.whatsapp_from,
                     body=message_data["body"],
-                    to=f"whatsapp:{recipient_phone}"
+                    to=recipient_phone
                 )
             else:
-                # Send SMS
+                # SMS fallback
+                logger.info(f"Sending SMS to: {recipient_phone}")
                 message = self.client.messages.create(
                     body=message_data["body"],
                     from_=self.sms_from or self.whatsapp_from,
@@ -166,18 +279,22 @@ class MessagingService:
                 "error": str(e),
                 "alert_type": alert_type.value
             }
-            
-        except Exception as e:
-            logger.error(f"Failed to send alert: {e}")
-            return {
-                "status": "failed",
-                "error": str(e),
-                "alert_type": alert_type.value
-            }
     
-    def _prepare_message_content(self, alert_type: AlertType, expense_data: Optional[Dict], 
-                                department_data: Optional[Dict], report_data: Optional[Dict]) -> Dict[str, str]:
-        """Prepare message content based on alert type"""
+    def _prepare_message_content(self, alert_type: AlertType, expense_data: Dict, 
+                                department_data: Dict, report_data: Dict, 
+                                approval_token: Optional[str] = None) -> Dict[str, str]:
+        """Prepare message content based on alert type with dashboard links"""
+        
+        # Create approval links if token is provided
+        approve_link = ""
+        reject_link = ""
+        dashboard_link = ""
+        
+        if approval_token and 'expense_id' in expense_data:
+            expense_id = expense_data['expense_id']
+            approve_link = f"\n✅ Approve: {APP_BASE_URL}/expenses/{expense_id}/approve/{approval_token}"
+            reject_link = f"\n❌ Reject: {APP_BASE_URL}/expenses/{expense_id}/reject/{approval_token}"
+            dashboard_link = f"\n📊 Review Dashboard: {APP_BASE_URL}/dashboard/expenses/{expense_id}"
         
         templates = {
             AlertType.ANOMALY_DETECTED: {
@@ -188,7 +305,9 @@ Amount: ${expense_data.get('amount', 0):.2f}
 Purpose: {expense_data.get('purpose', 'N/A')}
 Confidence: {expense_data.get('confidence_score', 0):.1%}
 Reason: {expense_data.get('reasoning', 'Suspicious pattern detected')}
-Action Required: Please review at your earliest convenience."""
+{dashboard_link}{approve_link}{reject_link}
+
+⚠️ Action Required: Click links above to approve/reject."""
             },
             AlertType.BUDGET_EXCEEDED: {
                 "body": f"""⚠️ BUDGET ALERT: {department_data.get('department', 'Department')}
@@ -203,7 +322,9 @@ Expense ID: {expense_data.get('expense_id', 'N/A')}
 Amount: ${expense_data.get('amount', 0):.2f} (Limit: ${department_data.get('escalation_limit', 0):.2f})
 Employee: {expense_data.get('employee_id', 'N/A')}
 Department: {expense_data.get('department', 'N/A')}
-Action: Senior approval required. Please review in the system."""
+{dashboard_link}{approve_link}{reject_link}
+
+Action: Senior approval required. Click links above."""
             },
             AlertType.CFO_REPORT_READY: {
                 "body": f"""📊 CFO REPORT ALERT
@@ -212,7 +333,8 @@ Total Expenses: {report_data.get('total_expenses_processed', 0)}
 Total Amount: ${report_data.get('total_amount_processed', 0):.2f}
 Anomaly Rate: {report_data.get('ml_insights', {}).get('anomaly_rate', 0):.1f}%
 Risk Level: {report_data.get('risk_assessment', {}).get('risk_level', 'N/A')}
-Access: /cfo/report endpoint"""
+
+📈 View Report: {APP_BASE_URL}/cfo/report"""
             },
             AlertType.EXPENSE_APPROVED: {
                 "body": f"""✅ EXPENSE APPROVED
@@ -230,10 +352,11 @@ Reason: {expense_data.get('comments', 'Policy violation')}"""
             }
         }
         
-        return templates.get(alert_type, {"body": "Alert: Action required in expense management system."})
+        return templates.get(alert_type, {"body": f"Alert: Action required in expense management system.\nDashboard: {APP_BASE_URL}"})
 
-# Initialize messaging service
+# Initialize services
 messaging_service = MessagingService()
+email_service = EmailService()
 
 # Pydantic Models
 class ExpenseSubmission(BaseModel):
@@ -262,18 +385,22 @@ class ExpenseResponse(BaseModel):
     anomaly_details: Optional[Dict[str, Any]] = None
     alert_sent: Optional[bool] = False
     alert_details: Optional[Dict[str, Any]] = None
+    dashboard_url: Optional[str] = None
+    approval_token: Optional[str] = None
 
 class DepartmentUpdate(BaseModel):
     monthly_budget: Optional[float] = Field(None, gt=0)
     auto_approve_limit: Optional[float] = Field(None, gt=0)
     escalation_limit: Optional[float] = Field(None, gt=0)
-    manager_phone: Optional[str] = Field(None, pattern=r'^\+\d{10,15}$', description="Manager phone number in E.164 format")
+    manager_phone: Optional[str] = Field(None, pattern=r'^\+\d{10,15}$')
+    manager_email: Optional[EmailStr] = None
 
 class ApprovalDecision(BaseModel):
     approved: bool
     reviewer: str = Field(..., min_length=2)
     comments: Optional[str] = Field(None, max_length=500)
     send_notification: Optional[bool] = Field(True, description="Send notification to employee")
+    notify_manager: Optional[bool] = Field(True, description="Send notification to manager")
 
 class MLTrainingResponse(BaseModel):
     status: str
@@ -287,6 +414,202 @@ class AlertRequest(BaseModel):
     expense_id: Optional[int] = None
     department: Optional[str] = None
     custom_message: Optional[str] = Field(None, max_length=500)
+
+# Enhanced Notification Service with Email
+class NotificationService:
+    @staticmethod
+    async def notify_approver(expense_id: int, employee_id: str, department: str, amount: float, 
+                             purpose: str, reasoning: str, confidence_score: float, 
+                             anomaly_details: Dict, alert_type: AlertType = AlertType.ANOMALY_DETECTED,
+                             approval_token: Optional[str] = None):
+        """Notify approvers via multiple channels with dashboard links"""
+        
+        try:
+            # Get manager phone number from department data
+            dept_data = departments_df[departments_df['department'] == department]
+            
+            # Check if department data exists and has manager_phone
+            if not dept_data.empty and 'manager_phone' in dept_data.columns:
+                manager_phone = dept_data.iloc[0]['manager_phone']
+                
+                # Prepare expense data for alert
+                expense_data = {
+                    'expense_id': expense_id,
+                    'employee_id': employee_id,
+                    'department': department,
+                    'amount': amount,
+                    'purpose': purpose,
+                    'reasoning': reasoning,
+                    'confidence_score': confidence_score
+                }
+                
+                # Send alert via Twilio if manager phone exists
+                if manager_phone and pd.notna(manager_phone):
+                    await messaging_service.send_alert(
+                        alert_type=alert_type,
+                        recipient_phone=manager_phone,
+                        expense_data=expense_data,
+                        department_data=dept_data.iloc[0].to_dict() if not dept_data.empty else None,
+                        approval_token=approval_token
+                    )
+                else:
+                    logger.warning(f"No valid manager phone for department {department}")
+            else:
+                logger.warning(f"Department {department} not found or no manager phone configured")
+        
+        except Exception as e:
+            logger.error(f"Error in notify_approver: {e}")
+        
+        # Also log to console for backup
+        message = f"""
+        EXPENSE REVIEW REQUIRED
+        ======================
+        Expense ID: {expense_id}
+        Employee: {employee_id}
+        Department: {department}
+        Amount: ${amount:.2f}
+        Purpose: {purpose}
+        
+        Policy Reasoning: {reasoning}
+        Anomaly Confidence: {confidence_score:.2f}
+        
+        Dashboard: {APP_BASE_URL}/dashboard/expenses/{expense_id}
+        Approval Links:
+        - Approve: {APP_BASE_URL}/expenses/{expense_id}/approve/{approval_token}
+        - Reject: {APP_BASE_URL}/expenses/{expense_id}/reject/{approval_token}
+        
+        Please review and approve/reject this expense.
+        """
+        logger.info(f"APPROVAL NOTIFICATION:\n{message}")
+    
+    @staticmethod
+    async def notify_employee(expense_id: int, employee_id: str, decision: str, 
+                            reviewer: str, comments: Optional[str] = None):
+        """Notify employee about expense decision via email"""
+        
+        employee_email = email_service.get_employee_email(employee_id)
+        if not employee_email:
+            logger.warning(f"No email found for employee {employee_id}")
+            return
+        
+        # Get employee name
+        employee = employees_df[employees_df['employee_id'] == employee_id]
+        employee_name = employee.iloc[0]['name'] if not employee.empty else employee_id
+        
+        # Get expense details
+        expense = expenses_df[expenses_df['expense_id'] == expense_id].iloc[0]
+        
+        subject = f"Expense #{expense_id} has been {decision}"
+        
+        # HTML email template
+        html_body = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: {'#4CAF50' if decision == 'approved' else '#f44336'}; 
+                          color: white; padding: 20px; border-radius: 5px; text-align: center; }}
+                .content {{ margin: 20px 0; }}
+                .details {{ background: #f9f9f9; padding: 15px; border-radius: 5px; border-left: 4px solid {'#4CAF50' if decision == 'approved' else '#f44336'}; }}
+                .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px; }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>{'✅' if decision == 'approved' else '❌'} Expense {decision.upper()}</h1>
+                </div>
+                
+                <div class="content">
+                    <p>Dear {employee_name},</p>
+                    <p>Your expense submission has been reviewed and <strong>{decision}</strong>.</p>
+                    
+                    <div class="details">
+                        <h3>Expense Details:</h3>
+                        <p><strong>Expense ID:</strong> #{expense_id}</p>
+                        <p><strong>Amount:</strong> ${expense['amount']:.2f}</p>
+                        <p><strong>Purpose:</strong> {expense['purpose']}</p>
+                        <p><strong>Department:</strong> {expense['department']}</p>
+                        <p><strong>Submitted:</strong> {expense['submission_date'].strftime('%Y-%m-%d')}</p>
+                        <p><strong>Reviewed By:</strong> {reviewer}</p>
+                        <p><strong>Status:</strong> <span style="color: {'#4CAF50' if decision == 'approved' else '#f44336'}; 
+                            font-weight: bold;">{decision.upper()}</span></p>
+                    </div>
+                    
+                    {f'<div class="details"><h3>Reviewer Comments:</h3><p>{comments}</p></div>' if comments else ''}
+                    
+                    <p>You can view the details of this expense and other submissions at:</p>
+                    <p><a href="{APP_BASE_URL}/dashboard/expenses/{expense_id}">{APP_BASE_URL}/dashboard/expenses/{expense_id}</a></p>
+                </div>
+                
+                <div class="footer">
+                    <p>This is an automated message from the Expense Management System.</p>
+                    <p>Please do not reply to this email.</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Plain text version
+        plain_body = f"""
+        Expense {decision.upper()}
+        ======================
+        
+        Dear {employee_name},
+        
+        Your expense submission has been reviewed and {decision}.
+        
+        Expense Details:
+        - ID: #{expense_id}
+        - Amount: ${expense['amount']:.2f}
+        - Purpose: {expense['purpose']}
+        - Department: {expense['department']}
+        - Reviewed By: {reviewer}
+        - Status: {decision.upper()}
+        
+        {f'Reviewer Comments: {comments}' if comments else ''}
+        
+        View details: {APP_BASE_URL}/dashboard/expenses/{expense_id}
+        
+        This is an automated message from the Expense Management System.
+        """
+        
+        # Send email
+        await email_service.send_email(
+            to_email=employee_email,
+            subject=subject,
+            body=plain_body,
+            html_body=html_body
+        )
+        
+        logger.info(f"Email notification sent to employee {employee_id} about expense {expense_id} ({decision})")
+    
+    @staticmethod
+    async def notify_cfo(report_data: Dict):
+        """Notify CFO of significant events"""
+        cfo_phone = os.getenv("CFO_PHONE_NUMBER")
+        if cfo_phone:
+            await messaging_service.send_alert(
+                alert_type=AlertType.CFO_REPORT_READY,
+                recipient_phone=cfo_phone,
+                report_data=report_data
+            )
+        
+        # Log to console
+        message = f"""
+        CFO ALERT: Monthly Expense Report
+        ================================
+        Total Expenses: {report_data.get('total_expenses_processed', 0)}
+        Total Amount: ${report_data.get('total_amount_processed', 0):.2f}
+        Anomaly Rate: {report_data.get('ml_insights', {}).get('anomaly_rate', 0):.1f}%
+        
+        High Risk Departments:
+        {json.dumps(report_data.get('ml_insights', {}).get('high_risk_departments', {}), indent=2)}
+        """
+        logger.info(f"CFO NOTIFICATION:\n{message}")
 
 # Enhanced Policy Check Service with Alert Integration
 class PolicyChecker:
@@ -343,95 +666,9 @@ class PolicyChecker:
             "alerts": alerts
         }
 
-# Enhanced Notification Service with Twilio Integration
-class NotificationService:
-    @staticmethod
-    async def notify_approver(expense_id: int, employee_id: str, department: str, amount: float, 
-                             purpose: str, reasoning: str, confidence_score: float, 
-                             anomaly_details: Dict, alert_type: AlertType = AlertType.ANOMALY_DETECTED):
-        """Notify approvers via multiple channels"""
-        
-        try:
-            # Get manager phone number from department data
-            dept_data = departments_df[departments_df['department'] == department]
-            
-            # Check if department data exists and has manager_phone
-            if not dept_data.empty and 'manager_phone' in dept_data.columns:
-                manager_phone = dept_data.iloc[0]['manager_phone']
-                
-                # Prepare expense data for alert
-                expense_data = {
-                    'expense_id': expense_id,
-                    'employee_id': employee_id,
-                    'department': department,
-                    'amount': amount,
-                    'purpose': purpose,
-                    'reasoning': reasoning,
-                    'confidence_score': confidence_score
-                }
-                
-                # Send alert via Twilio if manager phone exists
-                if manager_phone and pd.notna(manager_phone):
-                    await messaging_service.send_alert(
-                        alert_type=alert_type,
-                        recipient_phone=manager_phone,
-                        expense_data=expense_data,
-                        department_data=dept_data.iloc[0].to_dict() if not dept_data.empty else None
-                    )
-                else:
-                    logger.warning(f"No valid manager phone for department {department}")
-            else:
-                logger.warning(f"Department {department} not found or no manager phone configured")
-        
-        except Exception as e:
-            logger.error(f"Error in notify_approver: {e}")
-        
-        # Also log to console for backup (this part is working)
-        message = f"""
-        EXPENSE REVIEW REQUIRED
-        ======================
-        Expense ID: {expense_id}
-        Employee: {employee_id}
-        Department: {department}
-        Amount: ${amount:.2f}
-        Purpose: {purpose}
-        
-        Policy Reasoning: {reasoning}
-        Anomaly Confidence: {confidence_score:.2f}
-        
-        Anomaly Details:
-        {json.dumps(anomaly_details, indent=2)}
-        
-        Please review and approve/reject this expense.
-        """
-        logger.info(f"APPROVAL NOTIFICATION:\n{message}")
-    
-    @staticmethod
-    async def notify_cfo(report_data: Dict):
-        """Notify CFO of significant events"""
-        # Send alert to CFO
-        cfo_phone = os.getenv("CFO_PHONE_NUMBER")
-        if cfo_phone:
-            await messaging_service.send_alert(
-                alert_type=AlertType.CFO_REPORT_READY,
-                recipient_phone=cfo_phone,
-                report_data=report_data
-            )
-        
-        # Also log to console
-        message = f"""
-        CFO ALERT: Monthly Expense Report
-        ================================
-        Total Expenses: {report_data.get('total_expenses_processed', 0)}
-        Total Amount: ${report_data.get('total_amount_processed', 0):.2f}
-        Anomaly Rate: {report_data.get('ml_insights', {}).get('anomaly_rate', 0):.1f}%
-        
-        High Risk Departments:
-        {json.dumps(report_data.get('ml_insights', {}).get('high_risk_departments', {}), indent=2)}
-        """
-        logger.info(f"CFO NOTIFICATION:\n{message}")
+# Keep all other existing classes: CFOReportService, LearningGovernanceService
+# ... [Keep CFOReportService and LearningGovernanceService exactly as they are in your code] ...
 
-# CFO Reporting Service remains the same
 class CFOReportService:
     @staticmethod
     def _convert_to_serializable(obj):
@@ -634,30 +871,254 @@ class LearningGovernanceService:
             'recent_activity': recent_activity
         }
 
-# API Endpoints
-@app.get("/")
-async def root():
-    return {
-        "message": "Welcome to Expense Management API with ML Anomaly Detection & Alert System",
-        "version": "2.1.0",
-        "status": "operational",
-        "features": {
-            "ml_anomaly_detection": True,
-            "twilio_alerts": messaging_service.is_configured,
-            "cfo_reporting": True,
-            "audit_trail": True
-        },
-        "endpoints": {
-            "submit_expense": "POST /expenses/submit",
-            "review_expense": "POST /expenses/{id}/review", 
-            "cfo_report": "GET /cfo/report",
-            "ml_training": "POST /ml/retrain",
-            "audit_trail": "GET /audit/trail",
-            "send_alert": "POST /alerts/send",
-            "messaging_status": "GET /messaging/status"
-        }
-    }
+# HTML Dashboard Endpoints
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard_home():
+    """Main dashboard page"""
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Expense Management Dashboard</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+            .container { max-width: 1200px; margin: 0 auto; }
+            .header { background: #4CAF50; color: white; padding: 20px; border-radius: 5px; margin-bottom: 20px; }
+            .stats { display: flex; gap: 20px; margin-bottom: 30px; }
+            .stat-card { flex: 1; background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+            .btn { display: inline-block; padding: 10px 20px; background: #4CAF50; color: white; 
+                   text-decoration: none; border-radius: 5px; margin: 5px; }
+            .btn-danger { background: #f44336; }
+            table { width: 100%; background: white; border-collapse: collapse; }
+            th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+            th { background: #f9f9f9; }
+            .status-approved { color: #4CAF50; font-weight: bold; }
+            .status-pending { color: #FF9800; font-weight: bold; }
+            .status-rejected { color: #f44336; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>📊 Expense Management Dashboard</h1>
+                <p>Real-time expense tracking and approval system</p>
+            </div>
+            
+            <div class="stats">
+                <div class="stat-card">
+                    <h3>Total Expenses</h3>
+                    <p id="total-expenses">Loading...</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Pending Reviews</h3>
+                    <p id="pending-expenses">Loading...</p>
+                </div>
+                <div class="stat-card">
+                    <h3>Total Amount</h3>
+                    <p id="total-amount">Loading...</p>
+                </div>
+            </div>
+            
+            <div>
+                <h2>Recent Expenses</h2>
+                <div id="expenses-table">Loading expenses...</div>
+            </div>
+            
+            <div style="margin-top: 30px;">
+                <a href="/docs" class="btn" target="_blank">API Documentation</a>
+                <a href="/cfo/report" class="btn" target="_blank">CFO Report</a>
+                <a href="/audit/trail" class="btn" target="_blank">Audit Trail</a>
+            </div>
+        </div>
+        
+        <script>
+            async function loadDashboard() {
+                try {
+                    // Load stats
+                    const statsResponse = await fetch('/expenses/');
+                    const statsData = await statsResponse.json();
+                    
+                    document.getElementById('total-expenses').textContent = statsData.pagination.total;
+                    
+                    // Calculate pending expenses
+                    const pendingResponse = await fetch('/expenses/?status=pending');
+                    const pendingData = await pendingResponse.json();
+                    document.getElementById('pending-expenses').textContent = pendingData.pagination.total;
+                    
+                    // Calculate total amount
+                    const totalAmount = statsData.data.reduce((sum, exp) => sum + exp.amount, 0);
+                    document.getElementById('total-amount').textContent = '$' + totalAmount.toFixed(2);
+                    
+                    // Load recent expenses
+                    let tableHtml = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Employee</th>
+                                    <th>Department</th>
+                                    <th>Amount</th>
+                                    <th>Purpose</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    
+                    statsData.data.slice(0, 10).forEach(expense => {
+                        const statusClass = `status-${expense.status}`;
+                        tableHtml += `
+                            <tr>
+                                <td>${expense.expense_id}</td>
+                                <td>${expense.employee_id}</td>
+                                <td>${expense.department}</td>
+                                <td>$${expense.amount.toFixed(2)}</td>
+                                <td>${expense.purpose}</td>
+                                <td class="${statusClass}">${expense.status}</td>
+                                <td>
+                                    <a href="/dashboard/expenses/${expense.expense_id}" class="btn">View</a>
+                                </td>
+                            </tr>
+                        `;
+                    });
+                    
+                    tableHtml += `</tbody></table>`;
+                    document.getElementById('expenses-table').innerHTML = tableHtml;
+                    
+                } catch (error) {
+                    console.error('Error loading dashboard:', error);
+                    document.getElementById('expenses-table').innerHTML = 'Error loading expenses';
+                }
+            }
+            
+            loadDashboard();
+            // Refresh every 30 seconds
+            setInterval(loadDashboard, 30000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
+@app.get("/dashboard/expenses/{expense_id}", response_class=HTMLResponse)
+async def view_expense_dashboard(expense_id: int):
+    """View single expense in dashboard"""
+    
+    if expense_id > len(expenses_df) or expense_id < 1:
+        return HTMLResponse(content=f"<h1>Expense {expense_id} not found</h1>", status_code=404)
+    
+    expense = expenses_df.iloc[expense_id - 1]
+    employee = employees_df[employees_df['employee_id'] == expense['employee_id']]
+    employee_name = employee.iloc[0]['name'] if not employee.empty else expense['employee_id']
+    
+    # Get department data
+    dept_data = departments_df[departments_df['department'] == expense['department']]
+    dept_info = dept_data.iloc[0] if not dept_data.empty else {}
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Expense #{expense_id} - Dashboard</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }}
+            .container {{ max-width: 800px; margin: 0 auto; }}
+            .header {{ background: #4CAF50; color: white; padding: 20px; border-radius: 5px; margin-bottom: 20px; }}
+            .card {{ background: white; padding: 20px; border-radius: 5px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); margin-bottom: 20px; }}
+            .btn {{ display: inline-block; padding: 10px 20px; margin: 5px; color: white; text-decoration: none; border-radius: 5px; }}
+            .btn-approve {{ background: #4CAF50; }}
+            .btn-reject {{ background: #f44336; }}
+            .btn-back {{ background: #2196F3; }}
+            .status-badge {{ padding: 5px 10px; border-radius: 3px; color: white; font-weight: bold; }}
+            .status-approved {{ background: #4CAF50; }}
+            .status-pending {{ background: #FF9800; }}
+            .status-rejected {{ background: #f44336; }}
+            .status-suspicious {{ background: #9C27B0; }}
+            .details-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
+            .detail-item {{ padding: 10px; background: #f9f9f9; border-radius: 3px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>Expense #{expense_id} - {expense['purpose']}</h1>
+                <span class="status-badge status-{expense['status']}">{expense['status'].upper()}</span>
+            </div>
+            
+            <div class="card">
+                <h2>Expense Details</h2>
+                <div class="details-grid">
+                    <div class="detail-item">
+                        <strong>Employee:</strong><br>
+                        {employee_name} ({expense['employee_id']})
+                    </div>
+                    <div class="detail-item">
+                        <strong>Department:</strong><br>
+                        {expense['department']}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Amount:</strong><br>
+                        ${expense['amount']:.2f}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Purpose:</strong><br>
+                        {expense['purpose']}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Submitted:</strong><br>
+                        {expense['submission_date'].strftime('%Y-%m-%d %H:%M')}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Anomaly Confidence:</strong><br>
+                        {(expense['anomaly_confidence'] * 100):.1f}%
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2>Department Policy</h2>
+                <div class="details-grid">
+                    <div class="detail-item">
+                        <strong>Auto-approve Limit:</strong><br>
+                        ${dept_info.get('auto_approve_limit', 0):.2f}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Escalation Limit:</strong><br>
+                        ${dept_info.get('escalation_limit', 0):.2f}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Monthly Budget:</strong><br>
+                        ${dept_info.get('monthly_budget', 0):.2f}
+                    </div>
+                    <div class="detail-item">
+                        <strong>Budget Used:</strong><br>
+                        ${dept_info.get('budget_usage', 0):.2f}
+                    </div>
+                </div>
+            </div>
+            
+            {"<div class='card'><h2>Approval Actions</h2>" + 
+            f"""
+            <p>
+                <a href="/expenses/{expense_id}/approve/{expense['approval_token']}?reviewer=Dashboard" 
+                   class="btn btn-approve" onclick="return confirm('Approve this expense?')">✅ Approve Expense</a>
+                <a href="/expenses/{expense_id}/reject/{expense['approval_token']}?reviewer=Dashboard&reason=Policy+violation" 
+                   class="btn btn-reject" onclick="return confirm('Reject this expense?')">❌ Reject Expense</a>
+            </p>
+            """ + "</div>" if expense['status'] in ['pending', 'escalated', 'suspicious', 'budget_exceeded'] else ""}
+            
+            <div class="card">
+                <a href="/dashboard" class="btn btn-back">← Back to Dashboard</a>
+                <a href="/expenses/" class="btn btn-back" target="_blank">API View</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+# Enhanced API Endpoints
 @app.post("/expenses/submit", response_model=ExpenseResponse)
 async def submit_expense(expense: ExpenseSubmission, background_tasks: BackgroundTasks):
     """Submit a new expense for processing with ML anomaly detection and alerts"""
@@ -670,6 +1131,9 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
     
     # Generate expense ID
     expense_id = len(expenses_df) + 1
+    
+    # Generate approval token
+    approval_token = str(uuid.uuid4())
     
     # Get department data
     dept_data = departments_df[departments_df['department'] == expense.department].iloc[0]
@@ -701,6 +1165,13 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
     alert_sent = False
     alert_details = None
     
+    # Determine alert type based on policy and anomaly
+    alert_type = AlertType.ANOMALY_DETECTED
+    if "budget_exceeded" in final_status.lower():
+        alert_type = AlertType.BUDGET_EXCEEDED
+    elif "escalated" in final_status.lower():
+        alert_type = AlertType.ESCALATION_REQUIRED
+    
     if anomaly_result['is_anomalous']:
         final_status = "suspicious"
         anomaly_details.update({
@@ -724,10 +1195,10 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
             NotificationService.notify_approver,
             expense_id, expense.employee_id, expense.department, expense.amount,
             expense.purpose, final_reasoning, final_confidence, anomaly_details,
-            AlertType.ANOMALY_DETECTED
+            alert_type, approval_token
         )
         alert_sent = True
-        alert_details = {"type": "anomaly_detected", "timestamp": datetime.now().isoformat()}
+        alert_details = {"type": alert_type.value, "timestamp": datetime.now().isoformat()}
     
     # Check if any policy alerts need to be sent
     if policy_result.get('alerts'):
@@ -736,7 +1207,7 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
                 NotificationService.notify_approver,
                 expense_id, expense.employee_id, expense.department, expense.amount,
                 expense.purpose, final_reasoning, final_confidence, anomaly_details,
-                alert_type
+                alert_type, approval_token
             )
             alert_sent = True
             alert_details = {"type": alert_type.value, "timestamp": datetime.now().isoformat()}
@@ -752,28 +1223,21 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
         'submission_date': datetime.now(),
         'anomaly_confidence': anomaly_result['confidence_score'],
         'ml_anomaly': anomaly_result['is_anomalous'],
-        'alert_sent': alert_sent
+        'alert_sent': alert_sent,
+        'approval_token': approval_token
     }
     
-    
     expenses_df = pd.concat([expenses_df, pd.DataFrame([new_expense])], ignore_index=True)
-    
-    # Retrain ML model periodically (every 20 new expenses)
-    if len(expenses_df) % 20 == 0:
-        background_tasks.add_task(retrain_ml_model_background)
     
     # Update department budget usage if auto-approved
     if final_status == "auto_approved":
         departments_df.loc[departments_df['department'] == expense.department, 'budget_usage'] += expense.amount
     
-    # Trigger human review if needed
-    needs_review = policy_result['needs_human_review'] or anomaly_result['is_anomalous']
-    
     # Record in audit trail
     LearningGovernanceService.record_decision(
         expense_id, "submission", final_reasoning, "system",
         f"ML_confidence: {anomaly_result['confidence_score']:.3f}, Alert_sent: {alert_sent}",
-        {"anomaly_result": anomaly_result, "alert_sent": alert_sent}
+        {"anomaly_result": anomaly_result, "alert_sent": alert_sent, "approval_token": approval_token}
     )
     
     return ExpenseResponse(
@@ -785,15 +1249,17 @@ async def submit_expense(expense: ExpenseSubmission, background_tasks: Backgroun
         status=final_status,
         reasoning=final_reasoning,
         confidence_score=final_confidence,
-        needs_human_review=needs_review,
+        needs_human_review=policy_result['needs_human_review'] or anomaly_result['is_anomalous'],
         anomaly_details=anomaly_details,
         alert_sent=alert_sent,
-        alert_details=alert_details
+        alert_details=alert_details,
+        dashboard_url=f"{APP_BASE_URL}/dashboard/expenses/{expense_id}",
+        approval_token=approval_token
     )
 
 @app.post("/expenses/{expense_id}/review")
-async def review_expense(expense_id: int, decision: ApprovalDecision):
-    """Human review endpoint for expenses with optional notifications"""
+async def review_expense(expense_id: int, decision: ApprovalDecision, background_tasks: BackgroundTasks):
+    """Human review endpoint for expenses with email notifications"""
     
     if expense_id > len(expenses_df) or expense_id < 1:
         raise HTTPException(status_code=404, detail="Expense not found")
@@ -813,9 +1279,17 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
         amount = expense['amount']
         departments_df.loc[departments_df['department'] == dept, 'budget_usage'] += amount
     
-    # Send notification if requested
+    # Send notifications in background
     if decision.send_notification:
-        # Get employee manager phone (in production, you'd have an employee-manager mapping)
+        # Notify employee via email
+        background_tasks.add_task(
+            NotificationService.notify_employee,
+            expense_id, expense['employee_id'], new_status,
+            decision.reviewer, decision.comments
+        )
+    
+    if decision.notify_manager:
+        # Get manager info
         dept_data = departments_df[departments_df['department'] == expense['department']]
         if not dept_data.empty and 'manager_phone' in dept_data.columns:
             manager_phone = dept_data.iloc[0]['manager_phone']
@@ -829,13 +1303,12 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
             
             alert_type = AlertType.EXPENSE_APPROVED if decision.approved else AlertType.EXPENSE_REJECTED
             
-            # Send alert in background
-            asyncio.create_task(
-                messaging_service.send_alert(
-                    alert_type=alert_type,
-                    recipient_phone=manager_phone,
-                    expense_data=expense_data
-                )
+            # Send alert to manager
+            background_tasks.add_task(
+                messaging_service.send_alert,
+                alert_type=alert_type,
+                recipient_phone=manager_phone,
+                expense_data=expense_data
             )
     
     # Record decision
@@ -845,7 +1318,10 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
     
     LearningGovernanceService.record_decision(
         expense_id, f"review_{new_status}", reasoning, decision.reviewer, 
-        decision.comments, {"notification_sent": decision.send_notification}
+        decision.comments, {
+            "notification_sent": decision.send_notification,
+            "manager_notified": decision.notify_manager
+        }
     )
     
     return {
@@ -854,8 +1330,152 @@ async def review_expense(expense_id: int, decision: ApprovalDecision):
         "reviewer": decision.reviewer,
         "status": new_status,
         "comments": decision.comments,
-        "notification_sent": decision.send_notification
+        "employee_notified": decision.send_notification,
+        "manager_notified": decision.notify_manager,
+        "dashboard_url": f"{APP_BASE_URL}/dashboard/expenses/{expense_id}"
     }
+
+# Direct approval endpoints (for WhatsApp links)
+@app.get("/expenses/{expense_id}/approve/{token}")
+async def approve_expense_via_token(expense_id: int, token: str, reviewer: str = Query("Dashboard User")):
+    """Approve expense via dashboard token (direct from WhatsApp)"""
+    
+    if expense_id > len(expenses_df) or expense_id < 1:
+        return HTMLResponse(content=f"<h1>Expense {expense_id} not found</h1>", status_code=404)
+    
+    expense = expenses_df.iloc[expense_id - 1]
+    
+    if expense['approval_token'] != token:
+        return HTMLResponse(content=f"<h1>Invalid approval token</h1>", status_code=403)
+    
+    if expense['status'] not in ['pending', 'escalated', 'suspicious', 'budget_exceeded']:
+        return HTMLResponse(content=f"<h1>Expense already processed</h1>", status_code=400)
+    
+    # Update expense status
+    expenses_df.at[expense_id - 1, 'status'] = "approved"
+    
+    # Update budget
+    dept = expense['department']
+    amount = expense['amount']
+    departments_df.loc[departments_df['department'] == dept, 'budget_usage'] += amount
+    
+    # Notify employee via email
+    asyncio.create_task(
+        NotificationService.notify_employee(
+            expense_id, expense['employee_id'], "approved", reviewer, "Approved via dashboard link"
+        )
+    )
+    
+    # Record decision
+    LearningGovernanceService.record_decision(
+        expense_id, "review_approved", f"Approved via dashboard token by {reviewer}", reviewer
+    )
+    
+    # Return success page
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Expense Approved</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }}
+            .success {{ background: #4CAF50; color: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }}
+            .btn {{ display: inline-block; padding: 10px 20px; background: white; color: #4CAF50; 
+                   text-decoration: none; border-radius: 5px; margin-top: 20px; font-weight: bold; }}
+        </style>
+    </head>
+    <body>
+        <div class="success">
+            <h1>✅ Expense Approved Successfully!</h1>
+            <p>Expense #{expense_id} has been approved.</p>
+            <p><strong>Amount:</strong> ${amount:.2f}</p>
+            <p><strong>Employee:</strong> {expense['employee_id']}</p>
+            <p><strong>Approved by:</strong> {reviewer}</p>
+            <p>The employee has been notified via email.</p>
+            <a href="/dashboard/expenses/{expense_id}" class="btn">View Expense Details</a>
+            <a href="/dashboard" class="btn" style="background: #2196F3; color: white;">Back to Dashboard</a>
+        </div>
+        <script>
+            // Redirect after 5 seconds
+            setTimeout(function() {{
+                window.location.href = "/dashboard/expenses/{expense_id}";
+            }}, 5000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+@app.get("/expenses/{expense_id}/reject/{token}")
+async def reject_expense_via_token(expense_id: int, token: str, 
+                                 reason: str = Query("Policy violation"),
+                                 reviewer: str = Query("Dashboard User")):
+    """Reject expense via dashboard token (direct from WhatsApp)"""
+    
+    if expense_id > len(expenses_df) or expense_id < 1:
+        return HTMLResponse(content=f"<h1>Expense {expense_id} not found</h1>", status_code=404)
+    
+    expense = expenses_df.iloc[expense_id - 1]
+    
+    if expense['approval_token'] != token:
+        return HTMLResponse(content=f"<h1>Invalid approval token</h1>", status_code=403)
+    
+    if expense['status'] not in ['pending', 'escalated', 'suspicious', 'budget_exceeded']:
+        return HTMLResponse(content=f"<h1>Expense already processed</h1>", status_code=400)
+    
+    # Update expense status
+    expenses_df.at[expense_id - 1, 'status'] = "rejected"
+    
+    # Notify employee via email
+    asyncio.create_task(
+        NotificationService.notify_employee(
+            expense_id, expense['employee_id'], "rejected", reviewer, reason
+        )
+    )
+    
+    # Record decision
+    LearningGovernanceService.record_decision(
+        expense_id, "review_rejected", f"Rejected via dashboard token by {reviewer}: {reason}", reviewer
+    )
+    
+    # Return success page
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Expense Rejected</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }}
+            .rejected {{ background: #f44336; color: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }}
+            .btn {{ display: inline-block; padding: 10px 20px; background: white; color: #f44336; 
+                   text-decoration: none; border-radius: 5px; margin-top: 20px; font-weight: bold; }}
+        </style>
+    </head>
+    <body>
+        <div class="rejected">
+            <h1>❌ Expense Rejected</h1>
+            <p>Expense #{expense_id} has been rejected.</p>
+            <p><strong>Amount:</strong> ${expense['amount']:.2f}</p>
+            <p><strong>Employee:</strong> {expense['employee_id']}</p>
+            <p><strong>Rejected by:</strong> {reviewer}</p>
+            <p><strong>Reason:</strong> {reason}</p>
+            <p>The employee has been notified via email.</p>
+            <a href="/dashboard/expenses/{expense_id}" class="btn">View Expense Details</a>
+            <a href="/dashboard" class="btn" style="background: #2196F3; color: white;">Back to Dashboard</a>
+        </div>
+        <script>
+            // Redirect after 5 seconds
+            setTimeout(function() {{
+                window.location.href = "/dashboard/expenses/{expense_id}";
+            }}, 5000);
+        </script>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+# Keep all other existing endpoints exactly as they are
+# ... [All other endpoints from your original code remain unchanged] ...
 
 @app.get("/cfo/report")
 async def get_cfo_report(background_tasks: BackgroundTasks):
@@ -1165,6 +1785,52 @@ async def health_check():
         }
     }
 
+# Email configuration endpoint
+@app.post("/config/email")
+async def configure_email(
+    smtp_server: str = Query("smtp.gmail.com"),
+    smtp_port: int = Query(587),
+    smtp_username: str = Query(...),
+    smtp_password: str = Query(...),
+    from_email: str = Query(...)
+):
+    """Configure email service dynamically"""
+    os.environ["SMTP_SERVER"] = smtp_server
+    os.environ["SMTP_PORT"] = str(smtp_port)
+    os.environ["SMTP_USERNAME"] = smtp_username
+    os.environ["SMTP_PASSWORD"] = smtp_password
+    os.environ["FROM_EMAIL"] = from_email
+    
+    # Reinitialize email service
+    global email_service
+    email_service = EmailService()
+    
+    return {"message": "Email service reconfigured", "status": email_service.is_configured}
+
+# Update startup event
+@app.on_event("startup")
+async def startup_event():
+    """Initialize system on startup"""
+    logger.info("Expense Management API with Dashboard & Email starting up...")
+    logger.info(f"Loaded {len(expenses_df)} existing expenses")
+    logger.info(f"Tracking {len(employees_df)} employees")
+    logger.info(f"Tracking {len(departments_df)} departments")
+    logger.info(f"Dashboard URL: {APP_BASE_URL}/dashboard")
+    logger.info(f"Messaging service: {'CONFIGURED' if messaging_service.is_configured else 'SIMULATION MODE'}")
+    logger.info(f"Email service: {'CONFIGURED' if email_service.is_configured else 'SIMULATION MODE'}")
+    
+    # Train ML model on historical data
+    try:
+        result = ml_detector.train_ml_model(expenses_df)
+        if result["status"] == "success":
+            logger.info(f"ML model trained successfully on {result['training_samples']} samples")
+        else:
+            logger.warning(f"ML model training completed with status: {result}")
+    except Exception as e:
+        logger.warning(f"Initial ML model training failed: {e}. Using rule-based fallback.")
+    
+    logger.info("System startup completed")
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
@@ -1172,5 +1838,5 @@ if __name__ == "__main__":
         host="0.0.0.0", 
         port=8000,
         log_level="info",
-        reload=True  # Enable auto-reload for development
+        reload=True
     )
